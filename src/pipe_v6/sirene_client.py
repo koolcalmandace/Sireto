@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import logging
+import re
 from pathlib import Path
 import time
 from typing import Dict, Iterable, List, Tuple
@@ -138,7 +139,7 @@ def fetch_establishments_for_commune(
 
     api_key = (getattr(config, "sirene_token", None) or getattr(config, "sirene_api_key", None) or "").strip()
     if not api_key:
-        raise RuntimeError("SIRENE API key not configured (sirene_token or sirene_api_key)")
+        return _fetch_from_datagouv_fallback(commune, config, logger)
 
     headers = {
         "X-INSEE-Api-Key-Integration": api_key,
@@ -206,6 +207,202 @@ def fetch_establishments_for_commune(
         len(all_records),
     )
 
+    return all_records
+
+
+def _parse_address_string(addr_str: str | None) -> tuple[str | None, str | None, str | None]:
+    """Parse a French address string into (street_number, street_type, street_name)."""
+    if not addr_str:
+        return None, None, None
+    
+    # Remove postcode and city at the end (e.g. 69150 DECINES-CHARPIEU or similar 5-digit code)
+    cleaned = re.sub(r'\s+\d{5}\s+.*$', '', addr_str, flags=re.IGNORECASE).strip()
+    
+    # Try to match street number at start (e.g. 16, 16 BIS, 16A, etc.)
+    m = re.match(r'^(\d+)(?:\s+(BIS|TER|A|B|C|QUATER))?\s+(.*)$', cleaned, re.IGNORECASE)
+    if m:
+        num = m.group(1)
+        rep = m.group(2)
+        street_part = m.group(3)
+        street_number = f"{num} {rep}" if rep else num
+    else:
+        street_number = None
+        street_part = cleaned
+        
+    # Common French street types
+    street_types = [
+        "RUE", "AVENUE", "BOULEVARD", "ALLÉE", "ALLEY", "CHEMIN", "PLACE", "ROUTE", "IMPASSE", 
+        "SQUARE", "COURS", "QUAI", "PROMENADE", "ZONE", "ZA", "ZI", "ZAC", "AV", "BD", "PL", "RTE",
+        "ALL", "CHE"
+    ]
+    words = street_part.split()
+    if words and words[0].upper() in street_types:
+        street_type = words[0]
+        street_name = " ".join(words[1:])
+    else:
+        street_type = None
+        street_name = street_part
+        
+    return street_number, street_type, street_name
+
+
+def _map_datagouv_to_insee_format(result: dict) -> List[dict]:
+    """Map a DataGouv company search result to a list of raw INSEE-style establishment dicts."""
+    insee_records = []
+    
+    siren = result.get("siren")
+    nom_complet = result.get("nom_complet") or result.get("nom_raison_sociale")
+    nature_juridique = result.get("nature_juridique")
+    activite_principale_ul = result.get("activite_principale")
+    tranche_effectifs_ul = result.get("tranche_effectif_salarie")
+    annee_effectifs_ul = result.get("annee_tranche_effectif_salarie")
+    
+    unite_legale = {
+        "denominationUniteLegale": nom_complet,
+        "categorieJuridiqueUniteLegale": nature_juridique,
+        "activitePrincipaleUniteLegale": activite_principale_ul,
+        "trancheEffectifsUniteLegale": tranche_effectifs_ul,
+        "anneeEffectifsUniteLegale": annee_effectifs_ul,
+        "dateCreationUniteLegale": result.get("date_creation"),
+    }
+    
+    # Process both siege and matching establishments
+    etabs_to_process = []
+    
+    siege = result.get("siege")
+    if siege:
+        etabs_to_process.append(siege)
+        
+    for etab in result.get("matching_etablissements") or []:
+        if siege and etab.get("siret") == siege.get("siret"):
+            continue
+        etabs_to_process.append(etab)
+        
+    for etab in etabs_to_process:
+        siret = etab.get("siret")
+        if not siret:
+            continue
+            
+        enseignes = etab.get("liste_enseignes") or []
+        enseigne1 = enseignes[0] if len(enseignes) > 0 else None
+        enseigne2 = enseignes[1] if len(enseignes) > 1 else None
+        enseigne3 = enseignes[2] if len(enseignes) > 2 else None
+        
+        addr_str = etab.get("adresse")
+        num_part, type_part, name_part = _parse_address_string(addr_str)
+        
+        insee_rec = {
+            "siret": siret,
+            "siren": siren,
+            "nic": siret[-5:] if len(siret) == 14 else "",
+            "etablissementSiege": etab.get("est_siege", False),
+            "uniteLegale": unite_legale,
+            "enseigne1Etablissement": enseigne1,
+            "enseigne2Etablissement": enseigne2,
+            "enseigne3Etablissement": enseigne3,
+            "adresseEtablissement": {
+                "numeroVoieEtablissement": num_part,
+                "indiceRepetitionEtablissement": None,
+                "typeVoieEtablissement": type_part,
+                "libelleVoieEtablissement": name_part,
+                "complementAdresseEtablissement": etab.get("complement_adresse"),
+                "codePostalEtablissement": etab.get("code_postal"),
+                "libelleCommuneEtablissement": etab.get("libelle_commune"),
+                "codeCommuneEtablissement": etab.get("commune"),
+            },
+            "etatAdministratifEtablissement": etab.get("etat_administratif"),
+            "dateCreationEtablissement": etab.get("date_creation"),
+            "dateDebut": etab.get("date_debut_activite"),
+            "dateDernierTraitementEtablissement": etab.get("date_mise_a_jour") or etab.get("date_mise_a_jour_insee"),
+            "activitePrincipaleEtablissement": etab.get("activite_principale"),
+            "trancheEffectifsEtablissement": etab.get("tranche_effectif_salarie"),
+            "anneeEffectifsEtablissement": etab.get("annee_tranche_effectif_salarie"),
+        }
+        insee_records.append(insee_rec)
+        
+    return insee_records
+
+
+def _fetch_from_datagouv_fallback(
+    commune: CommuneKey, config: PipelineConfig, logger: logging.Logger
+) -> List[dict]:
+    """Fetch establishments using the public search API as a fallback when INSEE credentials are missing."""
+    
+    logger.info("Using keyless DataGouv API fallback for commune: insee=%s postcode=%s city=%s",
+                commune.insee_code, commune.postcode, commune.city)
+    
+    base_url = f"{config.datagouv_api_url.rstrip('/')}/search"
+    
+    params: dict[str, Any] = {}
+    if commune.insee_code:
+        params["code_commune"] = commune.insee_code
+    elif commune.postcode:
+        params["code_postal"] = commune.postcode
+    else:
+        logger.warning("Neither INSEE code nor postcode available for commune: %s. Fallback cannot query.", commune)
+        return []
+        
+    params["per_page"] = 25
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "Sireto-PipeV6/2.2",
+    }
+    
+    all_records: List[dict] = []
+    seen_sirets = set()
+    page = 1
+    
+    # Rate limiter: max 7 requests per second, so 0.15s delay between requests
+    last_req_time = 0.0
+    
+    while True:
+        params["page"] = page
+        url = f"{base_url}?{urlencode(params)}"
+        
+        # Enforce rate limit
+        now = time.time()
+        elapsed = now - last_req_time
+        if elapsed < 0.15:
+            time.sleep(0.15 - elapsed)
+        
+        logger.info("Fetching DataGouv page %d for commune %s...", page, commune.city or commune.postcode)
+        try:
+            last_req_time = time.time()
+            payload = _http_get_json(url, headers, timeout=20.0, logger=logger)
+        except Exception as e:
+            logger.error("Failed to fetch DataGouv page %d: %s", page, e)
+            break
+            
+        results = payload.get("results") or []
+        if not results:
+            break
+            
+        for company in results:
+            mapped_records = _map_datagouv_to_insee_format(company)
+            for rec in mapped_records:
+                siret = rec.get("siret")
+                # Filter by geographic code to ensure we only load establishments matching the target commune/postcode
+                addr_etab = rec.get("adresseEtablissement") or {}
+                etab_insee = addr_etab.get("codeCommuneEtablissement")
+                etab_postcode = addr_etab.get("codePostalEtablissement")
+                
+                geo_match = False
+                if commune.insee_code and etab_insee == commune.insee_code:
+                    geo_match = True
+                elif not commune.insee_code and commune.postcode and etab_postcode == commune.postcode:
+                    geo_match = True
+                
+                if geo_match and siret and siret not in seen_sirets:
+                    all_records.append(rec)
+                    seen_sirets.add(siret)
+                    
+        total_pages = payload.get("total_pages", 1)
+        if page >= total_pages or len(results) < 25 or len(all_records) >= 10000:
+            break
+            
+        page += 1
+        
+    logger.info("Fallback done: fetched %d establishments from DataGouv for %s", len(all_records), commune.city or commune.postcode)
     return all_records
 
 
