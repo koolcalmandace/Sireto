@@ -75,6 +75,9 @@ def export_results(
     if target.suffix.lower() not in {".csv", ".json"}:
         raise ValueError("output_path must end with .csv or .json")
 
+    # Ensure parent directory exists
+    target.parent.mkdir(parents=True, exist_ok=True)
+
     # Reload CRM and merge on crm_id (all CRM rows kept).
     df_crm = load_crm(config.crm_path)
 
@@ -217,6 +220,7 @@ def save_stats_json(stats: dict, path: Path) -> None:
     import json
 
     target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("w", encoding="utf-8") as fh:
         json.dump(stats, fh, indent=2, ensure_ascii=False)
 
