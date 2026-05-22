@@ -1,8 +1,10 @@
 import pandas as pd
 from pathlib import Path
 
-results_path = Path("data/reports/results.csv")
-unmatched_path = Path("data/reports/unmatched_rows.csv")
+import sys
+
+results_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("data/reports/results.csv")
+unmatched_path = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("data/reports/unmatched_rows.csv")
 
 if not results_path.exists():
     print(f"Error: {results_path} does not exist!")

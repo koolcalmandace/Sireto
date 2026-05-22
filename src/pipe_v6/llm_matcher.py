@@ -309,7 +309,9 @@ def _decide_match_rule_based(
         s = re.sub(r"\s+", " ", s).strip()
         for tok in ["SAS", "SARL", "SASU", "SA", "ASSOCIATION", "ENTREPRISE", "SOCIETE", "AGENCE", "SITE", "BUREAU", "ANTENNE", "DELEGATION", "DIRECTION", "SERVICE"]:
             s = re.sub(r"\b" + tok + r"\b", "", s)
-        return re.sub(r"\s+", " ", s).strip()
+        # Collapse: remove all spaces, punctuation, and non-alphanumeric characters
+        s = re.sub(r"[^A-Z0-9]", "", s)
+        return s
 
     crm_name_clean = clean_name(crm_name_raw)
 
