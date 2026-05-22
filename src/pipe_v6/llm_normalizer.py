@@ -460,6 +460,59 @@ Réponds maintenant UNIQUEMENT avec l'objet JSON demandé.
     return prompt
 
 
+def _normalize_crm_entry_rule_based(
+    row: pd.Series,
+    expected_city: str | None = None,
+    logger: logging.Logger | None = None,
+) -> NormalizedCRMEntry:
+    """Zero-setup rule-based fallback for CRM normalization."""
+    log = logger or LOGGER
+
+    crm_name = str(_row_get(row, "crm_name", "") or "").strip()
+
+    # Clean name: pre-clean to uppercase ASCII
+    cleaned_name_raw = _collapse_spaces(_transliterate(crm_name.upper()))
+    cleaned_name_raw = re.sub(r"[^A-Z0-9 '&\-/]", "", cleaned_name_raw)
+
+    try:
+        normalized_name = _prepare_name(cleaned_name_raw, expected_city=expected_city)
+    except Exception as exc:
+        log.debug("Rule-based name prep failed: %s. Using raw uppercase name.", exc)
+        normalized_name = cleaned_name_raw if cleaned_name_raw else "INCONNU"
+
+    # Clean address
+    num = str(_row_get(row, "street_number", "0") or "0").strip()
+    if not num or num.lower() == "nan":
+        num = "0"
+
+    street = str(_row_get(row, "street_name", "") or "").strip().upper()
+    street = _collapse_spaces(_transliterate(street))
+    street = re.sub(r"[^A-Z0-9 '()\-/]", "", street)
+    if not street or street.lower() == "nan":
+        street = "SANS ADRESSE"
+
+    postcode = str(_row_get(row, "postcode", "00000") or "00000").strip()
+    if not postcode or postcode.lower() == "nan":
+        postcode = "00000"
+
+    normalized_address = f"{num} {street} {postcode}"
+
+    # Guess category
+    name_upper = normalized_name.upper()
+    if any(k in name_upper for k in ["COLLEGE", "MAIRIE", "ECOLE", "UNIVERSITE", "LYCEE", "PUBLIC", "COMMUNE", "SNCF", "RATP", "LA POSTE"]):
+        category = "PUBLIC"
+    elif any(k in name_upper for k in ["ARMOIRE", "NRO", "ABRI", "STATION", "PARKING", "ECLAIRAGE", "PYLONE", "TRANSFORMATEUR"]):
+        category = "EQUIPEMENT_URBAIN"
+    else:
+        category = "PRIVE"
+
+    return NormalizedCRMEntry(
+        normalized_name=normalized_name,
+        normalized_address=normalized_address,
+        category=category,
+    )
+
+
 def normalize_crm_entry(
     row: pd.Series,
     config: PipelineConfig,
@@ -488,15 +541,31 @@ def normalize_crm_entry(
             postcode,
         )
 
+    # Check if we should fall back to rule-based normalization upfront
+    api_key = (getattr(config, "openrouter_api_key", None) or "").strip()
+    provider = getattr(config, "llm_provider", "ollama").lower()
+
+    use_fallback = False
+    if provider == "openrouter" and not api_key:
+        use_fallback = True
+
+    if use_fallback:
+        log.info("CRM %s: using rule-based normalizer fallback (keyless)", crm_id)
+        return _normalize_crm_entry_rule_based(row, expected_city=_row_get(row, "city") if not pd.isna(_row_get(row, "city")) else None, logger=log)
+
     prompt = build_normalizer_prompt(row)
 
-    result = normalize_with_llm(
-        prompt=prompt,
-        config=config,
-        logger=log,
-        client=client,
-        expected_city=_row_get(row, "city") if not pd.isna(_row_get(row, "city")) else None,
-    )
+    try:
+        result = normalize_with_llm(
+            prompt=prompt,
+            config=config,
+            logger=log,
+            client=client,
+            expected_city=_row_get(row, "city") if not pd.isna(_row_get(row, "city")) else None,
+        )
+    except (LLMCallError, NormalizationParseError) as exc:
+        log.warning("CRM %s: LLM normalization failed, falling back to rule-based: %s", crm_id, exc)
+        return _normalize_crm_entry_rule_based(row, expected_city=_row_get(row, "city") if not pd.isna(_row_get(row, "city")) else None, logger=log)
 
     log.debug(
         "CRM %s normalized: name=%s, addr=%s, category=%s",

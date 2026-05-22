@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+import re
+import unicodedata
+from difflib import SequenceMatcher
 from typing import Literal
 
 from pipe_v6.config import PipelineConfig
@@ -279,6 +282,112 @@ def parse_match_decision(
     )
 
 
+def _decide_match_rule_based(
+    row,
+    norm_entry: NormalizedCRMEntry,
+    candidates: list[NormalizedCandidate],
+    config: PipelineConfig,
+    logger: logging.Logger | None = None,
+) -> LLMMatchDecision:
+    """Rule-based decision fallback using name, address, multi-source and category similarity."""
+    log = logger or LOGGER
+    if not candidates:
+        return LLMMatchDecision(
+            decision="NO_MATCH",
+            chosen_siret=None,
+            confidence=0.0,
+            reason="No candidates to match",
+        )
+
+    # Clean CRM fields
+    crm_name_raw = norm_entry.normalized_name.upper()
+    crm_addr_raw = norm_entry.normalized_address.upper()
+    crm_category = norm_entry.category.upper()
+
+    def clean_name(s: str) -> str:
+        s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii").upper()
+        s = re.sub(r"\s+", " ", s).strip()
+        for tok in ["SAS", "SARL", "SASU", "SA", "ASSOCIATION", "ENTREPRISE", "SOCIETE", "AGENCE", "SITE", "BUREAU", "ANTENNE", "DELEGATION", "DIRECTION", "SERVICE"]:
+            s = re.sub(r"\b" + tok + r"\b", "", s)
+        return re.sub(r"\s+", " ", s).strip()
+
+    crm_name_clean = clean_name(crm_name_raw)
+
+    best_candidate = None
+    best_conf = -1.0
+    best_reason = ""
+
+    for cand in candidates:
+        # 1. Address matching
+        cand_addr = f"{cand.address or ''} {cand.postcode or ''}".strip().upper()
+        # Clean address
+        cand_addr_clean = unicodedata.normalize("NFKD", cand_addr).encode("ascii", "ignore").decode("ascii")
+        cand_addr_clean = re.sub(r"[^A-Z0-9 ]", "", cand_addr_clean)
+        cand_addr_clean = re.sub(r"\s+", " ", cand_addr_clean).strip()
+
+        crm_addr_clean = unicodedata.normalize("NFKD", crm_addr_raw).encode("ascii", "ignore").decode("ascii")
+        crm_addr_clean = re.sub(r"[^A-Z0-9 ]", "", crm_addr_clean)
+        crm_addr_clean = re.sub(r"\s+", " ", crm_addr_clean).strip()
+
+        if crm_addr_clean and cand_addr_clean == crm_addr_clean:
+            address_score = 0.50
+        else:
+            addr_ratio = SequenceMatcher(None, crm_addr_clean, cand_addr_clean).ratio() if crm_addr_clean and cand_addr_clean else 0.0
+            if addr_ratio > 0.85:
+                address_score = 0.50
+            elif addr_ratio > 0.70:
+                address_score = 0.30
+            elif addr_ratio > 0.40:
+                address_score = 0.15
+            else:
+                address_score = 0.0
+
+        # 2. Name matching
+        cand_name_clean = clean_name(cand.name or "")
+        if crm_name_clean and cand_name_clean == crm_name_clean:
+            name_score = 0.30
+        else:
+            name_ratio = SequenceMatcher(None, crm_name_clean, cand_name_clean).ratio() if crm_name_clean and cand_name_clean else 0.0
+            if name_ratio > 0.80:
+                name_score = 0.30
+            elif name_ratio > 0.55:
+                name_score = 0.20
+            elif name_ratio > 0.30:
+                name_score = 0.10
+            else:
+                name_score = 0.0
+
+        # 3. Multi-source
+        multisource_score = 0.20 if len(cand.sources) >= 2 else 0.0
+
+        # 4. Category
+        category_score = 0.10 if cand.category == crm_category else 0.0
+
+        conf = address_score + name_score + multisource_score + category_score
+        conf = max(0.0, min(1.0, conf))
+
+        # Check if this is the best so far
+        if conf > best_conf:
+            best_conf = conf
+            best_candidate = cand
+            best_reason = f"Rule-based match (addr_score={address_score:.2f}, name_score={name_score:.2f}, multi_source={len(cand.sources)}, cat_score={category_score:.2f})"
+
+    if best_candidate and best_conf >= 0.20:
+        return LLMMatchDecision(
+            decision="BEST_MATCH",
+            chosen_siret=best_candidate.siret,
+            confidence=best_conf,
+            reason=best_reason,
+        )
+    else:
+        return LLMMatchDecision(
+            decision="NO_MATCH",
+            chosen_siret=None,
+            confidence=0.0,
+            reason="No candidates met minimum matching confidence threshold",
+        )
+
+
 def decide_match(
     row,
     norm_entry: NormalizedCRMEntry,
@@ -308,6 +417,25 @@ def decide_match(
             reason="No candidates found after filtering",
         )
 
+    crm_id = getattr(row, "crm_id", None)
+    if crm_id is None and hasattr(row, "get"):
+        try:
+            crm_id = row.get("crm_id")
+        except Exception:
+            crm_id = None
+
+    # Check if we should fall back to rule-based matcher upfront
+    api_key = (getattr(config, "openrouter_api_key", None) or "").strip()
+    provider = getattr(config, "llm_provider", "ollama").lower()
+
+    use_fallback = False
+    if provider == "openrouter" and not api_key:
+        use_fallback = True
+
+    if use_fallback:
+        log.info("CRM %s: using rule-based matcher fallback (keyless)", crm_id)
+        return _decide_match_rule_based(row, norm_entry, candidates, config, logger=log)
+
     owns_client = False
     if client is None:
         client = create_llm_client(config, logger=log)
@@ -317,12 +445,6 @@ def decide_match(
         prompt = build_matcher_prompt(row, norm_entry, candidates)
         prompt_len = len(prompt)
         prompt_tokens_est = int(len(prompt.split()) * 1.3)
-        crm_id = getattr(row, "crm_id", None)
-        if crm_id is None and hasattr(row, "get"):
-            try:
-                crm_id = row.get("crm_id")
-            except Exception:  # pragma: no cover - safe fallback
-                crm_id = None
         log.info(
             "LLM matcher call: crm_id=%s candidates=%s prompt_len=%s chars (~%s tokens)",
             crm_id,
@@ -343,13 +465,8 @@ def decide_match(
         return parse_match_decision(response.parsed_json, candidates, logger=log)
 
     except Exception as exc:  # catch all to never raise upstream
-        log.error("LLM matcher failed: %s", exc, exc_info=True)
-        return LLMMatchDecision(
-            decision="NO_MATCH",
-            chosen_siret=None,
-            confidence=0.0,
-            reason=f"LLM_ERROR: {type(exc).__name__}",
-        )
+        log.warning("CRM %s: LLM matcher failed, falling back to rule-based: %s", crm_id, exc)
+        return _decide_match_rule_based(row, norm_entry, candidates, config, logger=log)
     finally:
         if owns_client:
             client.close()
