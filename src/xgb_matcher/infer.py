@@ -23,6 +23,7 @@ import pickle
 from dataclasses import replace
 from dataclasses import dataclass, field
 from pathlib import Path
+from collections import OrderedDict
 from typing import Any, Dict, List, Tuple, TYPE_CHECKING
 
 import numpy as np
@@ -191,6 +192,8 @@ class XgbInferenceEngine:
                     "SEMANTIC UNAVAILABLE: sentence_transformers not installed or model failed to load. "
                     "Install with: pip install sentence-transformers or set XGB_ALLOW_NO_SEMANTIC=1."
                 )
+        
+        self._partition_cache: OrderedDict = OrderedDict()
     
     @classmethod
     def from_models(
@@ -670,6 +673,9 @@ class XgbInferenceEngine:
                 
                 # Pre-warm these top-N candidates
                 for idx in top_n_idx:
+                    feat = feats_stage1[idx]
+                    if not semantic_gate_allows(feat.get("name_jaro_max", 0.0), feat.get("name_token_overlap_max", 0.0)):
+                        continue
                     _, c = cand_list[idx]
                     cand_city_norm = c.get("_xgb_cached_city_norm") or normalize_text(c.get("city"))
                     pool = build_semantic_name_pool(
@@ -1024,6 +1030,7 @@ class XgbInferenceEngine:
             tfidf_cache={},
             gt_siret=None,
             siren_to_geo=self.siren_to_geo,
+            partition_cache=getattr(self, "_partition_cache", None),
         )
         return result.candidates, result.idf_map, result.default_idf
 

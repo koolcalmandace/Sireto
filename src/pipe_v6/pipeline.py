@@ -6,7 +6,10 @@ import concurrent.futures
 import json
 import logging
 import os
+import re
 import sqlite3
+import unicodedata
+from difflib import SequenceMatcher
 from typing import Any, Iterable, Sequence
 
 import pandas as pd
@@ -14,6 +17,8 @@ import pandas as pd
 from .candidate_store import (
     group_raw_candidates,
     enrich_candidates_from_sirene,
+    RawCandidate,
+    create_raw_candidate,
 )
 from .commune_detection import CommuneKey, extract_communes
 from .config import PipelineConfig
@@ -274,6 +279,220 @@ def _select_web_candidate(
     return chosen, evidence, confidence, len(eligible)
 
 
+def search_local_cache(
+    norm_entry: NormalizedCRMEntry,
+    row: Any,
+    conn: sqlite3.Connection,
+    config: PipelineConfig,
+    logger: logging.Logger,
+) -> list[RawCandidate]:
+    """Search local SQLite database for potential matching candidates in the same postcode/city."""
+    postcode = _get(row, "postcode", None)
+    insee = _get(row, "insee_code", None) or _get(row, "insee", None)
+    city = _get(row, "city", None)
+
+    if not postcode and not insee and not city:
+        return []
+
+    # Clean CRM fields
+    crm_name_raw = norm_entry.normalized_name.upper()
+    
+    def clean_name(s: str) -> str:
+        s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii").upper()
+        s = re.sub(r"\s+", " ", s).strip()
+        for tok in ["SAS", "SARL", "SASU", "SA", "ASSOCIATION", "ENTREPRISE", "SOCIETE", "AGENCE", "SITE", "BUREAU", "ANTENNE", "DELEGATION", "DIRECTION", "SERVICE", "INTERNATIONAL", "FRANCE", "GROUP", "GROUPE", "HOLDING", "DEVELOPPEMENT", "DISTRIBUTION", "EUROPE"]:
+            s = re.sub(r"\b" + tok + r"\b", "", s)
+        s = re.sub(r"[^A-Z0-9]", "", s)
+        return s
+
+    def clean_street(s: str) -> str:
+        s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii").upper()
+        s = re.sub(r"\s+", " ", s).strip()
+        for tok in ["RUE", "AVENUE", "BOULEVARD", "ALLEE", "ROUTE", "CHEMIN", "PLACE", "SQUARE", "IMPASSE", "COURS", "AV", "BD", "R", "RTE", "PL"]:
+            s = re.sub(r"\b" + tok + r"\b", "", s)
+        s = re.sub(r"[^A-Z0-9]", "", s)
+        return s
+
+    def clean_street_sig(s: str) -> str:
+        s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii").upper()
+        tokens = s.split()
+        street_types = {"RUE", "AVENUE", "BOULEVARD", "ALLEE", "ROUTE", "CHEMIN", "PLACE", "SQUARE", "IMPASSE", "COURS", "AV", "BD", "R", "RTE", "PL"}
+        filtered = []
+        for t in tokens:
+            if t in street_types:
+                continue
+            if re.match(r"^\d+$", t): # number or postcode
+                continue
+            filtered.append(t)
+        res = "".join(filtered)
+        res = re.sub(r"[^A-Z0-9]", "", res)
+        return res
+
+    def get_street_number(addr_str: str) -> str:
+        tokens = addr_str.split()
+        if tokens and re.match(r"^\d+$", tokens[0]) and tokens[0] != "0":
+            return tokens[0]
+        for t in tokens:
+            if re.match(r"^\d+$", t) and t != "0" and len(t) < 5:
+                return t
+        return ""
+
+    crm_name_clean = clean_name(crm_name_raw)
+    crm_street_num = _get(row, "street_number", "")
+    crm_street_name = _get(row, "street_name", "")
+    crm_street_clean = clean_street(crm_street_name)
+
+    cursor = conn.cursor()
+    cursor.row_factory = sqlite3.Row
+
+    rows = []
+    # Try fetching by postcode first
+    if postcode:
+        pc_str = str(postcode).strip().zfill(5)
+        cursor.execute(
+            "SELECT siret, siren, denomination, denomination_unite_legale, nom_unite_legale, prenom1_unite_legale, "
+            "enseigne1, enseigne2, enseigne3, street_number, street_name, address_full, postcode, city, insee_code, "
+            "legal_nature, etat_administratif FROM establishments WHERE postcode = ?",
+            (pc_str,)
+        )
+        rows = cursor.fetchall()
+
+    # Fallback to INSEE code if postcode fetch returned nothing
+    if not rows and insee:
+        insee_str = str(insee).strip().zfill(5)
+        cursor.execute(
+            "SELECT siret, siren, denomination, denomination_unite_legale, nom_unite_legale, prenom1_unite_legale, "
+            "enseigne1, enseigne2, enseigne3, street_number, street_name, address_full, postcode, city, insee_code, "
+            "legal_nature, etat_administratif FROM establishments WHERE insee_code = ?",
+            (insee_str,)
+        )
+        rows = cursor.fetchall()
+
+    # Fallback to city (collapsing/matching)
+    if not rows and city:
+        city_clean = clean_name(str(city))
+        cursor.execute(
+            "SELECT siret, siren, denomination, denomination_unite_legale, nom_unite_legale, prenom1_unite_legale, "
+            "enseigne1, enseigne2, enseigne3, street_number, street_name, address_full, postcode, city, insee_code, "
+            "legal_nature, etat_administratif FROM establishments"
+        )
+        all_est = cursor.fetchall()
+        rows = [r for r in all_est if r["city"] and clean_name(r["city"]) == city_clean]
+
+    candidates: list[RawCandidate] = []
+    for r in rows:
+        name_variants = [
+            r["denomination"],
+            r["denomination_unite_legale"],
+            r["enseigne1"],
+            r["enseigne2"],
+            r["enseigne3"]
+        ]
+        if r["nom_unite_legale"]:
+            if r["prenom1_unite_legale"]:
+                name_variants.append(f"{r['nom_unite_legale']} {r['prenom1_unite_legale']}")
+            else:
+                name_variants.append(r["nom_unite_legale"])
+
+        name_variants = [v for v in name_variants if v]
+        if not name_variants:
+            continue
+
+        clean_variants = [clean_name(v) for v in name_variants]
+
+        max_name_ratio = 0.0
+        is_substring = False
+        for v_clean in clean_variants:
+            if not v_clean:
+                continue
+            ratio = SequenceMatcher(None, crm_name_clean, v_clean).ratio()
+            if ratio > max_name_ratio:
+                max_name_ratio = ratio
+            if len(crm_name_clean) >= 4 and (crm_name_clean in v_clean or v_clean in crm_name_clean):
+                is_substring = True
+
+        name_ratio_ok = (max_name_ratio > 0.40) or is_substring
+
+        cand_street_name = r["street_name"]
+        cand_address_full = r["address_full"]
+        cand_street_clean = clean_street(cand_street_name or cand_address_full or "")
+        
+        street_ratio = SequenceMatcher(None, crm_street_clean, cand_street_clean).ratio() if crm_street_clean and cand_street_clean else 0.0
+        street_match_close = (street_ratio > 0.80) and (max_name_ratio > 0.20)
+
+        crm_street_num_clean = str(crm_street_num).strip().upper() if crm_street_num else ""
+        cand_street_num_clean = str(r["street_number"]).strip().upper() if r["street_number"] else ""
+        
+        # Check if numbers match or are within tolerance (difference <= 2)
+        crm_num = get_street_number(crm_street_num_clean or crm_street_name)
+        cand_num = get_street_number(cand_street_num_clean or cand_street_name or cand_address_full or "")
+        num_match = False
+        if not crm_num or not cand_num:
+            num_match = True
+        else:
+            try:
+                num_match = abs(int(crm_num) - int(cand_num)) <= 2
+            except ValueError:
+                num_match = (crm_num == cand_num)
+
+        # Check signature match
+        crm_sig = clean_street_sig(crm_street_name)
+        cand_sig = clean_street_sig(cand_street_name or cand_address_full or "")
+        street_sig_match = False
+        if crm_sig and cand_sig:
+            if crm_sig == cand_sig:
+                street_sig_match = True
+            elif len(crm_sig) >= 5 and len(cand_sig) >= 5:
+                if crm_sig in cand_sig or cand_sig in crm_sig:
+                    street_sig_match = True
+                else:
+                    sig_ratio = SequenceMatcher(None, crm_sig, cand_sig).ratio()
+                    if sig_ratio > 0.60:
+                        street_sig_match = True
+
+        exact_address_match = False
+        if crm_street_clean and cand_street_clean:
+            if crm_street_clean == cand_street_clean and crm_street_num_clean == cand_street_num_clean:
+                exact_address_match = True
+            elif crm_street_num_clean == cand_street_num_clean and crm_street_num_clean not in ["", "0"]:
+                if len(cand_street_clean) >= 6 and cand_street_clean in crm_street_clean:
+                    exact_address_match = True
+                elif len(crm_street_clean) >= 6 and crm_street_clean in cand_street_clean:
+                    exact_address_match = True
+            elif street_sig_match and num_match:
+                exact_address_match = True
+
+        if name_ratio_ok or street_match_close or exact_address_match:
+            siren = r["siren"]
+            siret = r["siret"]
+            denomination = r["denomination"] or r["denomination_unite_legale"] or r["nom_unite_legale"] or "NOM_INCONNU"
+            url = f"https://annuaire-entreprises.data.gouv.fr/entreprise/{siren}"
+            
+            extras = {
+                "query": norm_entry.normalized_name,
+                "adresse": r["address_full"],
+                "source": "LOCAL_CACHE",
+            }
+            candidates.append(
+                create_raw_candidate(
+                    source="DATAGOUV",
+                    siren=siren,
+                    siret=siret,
+                    label=denomination,
+                    url=url,
+                    extra=extras,
+                )
+            )
+
+    logger.debug(
+        "Local cache search fallback for name=%s city=%s -> %d candidate(s)",
+        norm_entry.normalized_name,
+        city,
+        len(candidates)
+    )
+    return candidates
+
+
 def process_crm_row(
     row: Any,
     config: PipelineConfig,
@@ -387,6 +606,19 @@ def process_crm_row(
         except Exception as exc:
             logger.error("CRM %s: DataGouv search failed: %s", crm_id, exc)
 
+        # Fallback / supplement: search local cache database
+        try:
+            local_cands = search_local_cache(
+                norm_entry=norm_entry,
+                row=row,
+                conn=conn,
+                config=config,
+                logger=logger,
+            )
+            all_candidates.extend(local_cands)
+        except Exception as exc:
+            logger.error("CRM %s: local cache search failed: %s", crm_id, exc)
+
 
 
         # 4) Agrégation et enrichissement SIRENE
@@ -395,7 +627,7 @@ def process_crm_row(
         candidate_count_total = len(candidates)
 
         filtered = filter_candidates_by_category(
-            norm_entry.category, candidates, config, logger=logger
+            norm_entry.category, candidates, config, logger=logger, norm_entry=norm_entry
         )
         candidate_count_used = len(filtered)
 

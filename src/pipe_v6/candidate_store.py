@@ -181,6 +181,12 @@ class NormalizedCandidate:
     raw_candidates: list[RawCandidate]
     category: str
     web_ranks: dict[str, int] = field(default_factory=dict)
+    denomination_unite_legale: str | None = None
+    nom_unite_legale: str | None = None
+    prenom1_unite_legale: str | None = None
+    enseigne1: str | None = None
+    enseigne2: str | None = None
+    enseigne3: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dictionary for export/logging."""
@@ -198,6 +204,12 @@ class NormalizedCandidate:
             "raw_candidates": [rc.to_dict() for rc in self.raw_candidates],
             "category": self.category,
             "web_ranks": dict(self.web_ranks),
+            "denomination_unite_legale": self.denomination_unite_legale,
+            "nom_unite_legale": self.nom_unite_legale,
+            "prenom1_unite_legale": self.prenom1_unite_legale,
+            "enseigne1": self.enseigne1,
+            "enseigne2": self.enseigne2,
+            "enseigne3": self.enseigne3,
         }
 
 
@@ -253,7 +265,8 @@ def enrich_candidates_from_sirene(
 
         if key_type == "siret":
             row = conn.execute(
-                "SELECT siret, siren, denomination, address_full, postcode, city, insee_code, legal_nature, etat_administratif "
+                "SELECT siret, siren, denomination, address_full, postcode, city, insee_code, legal_nature, etat_administratif, "
+                "denomination_unite_legale, nom_unite_legale, prenom1_unite_legale, enseigne1, enseigne2, enseigne3 "
                 "FROM establishments WHERE siret = ?",
                 (value,),
             ).fetchone()
@@ -272,6 +285,12 @@ def enrich_candidates_from_sirene(
                     raw_candidates=raw_candidates,
                     category=map_legal_to_category(row["legal_nature"], log),
                     web_ranks=web_ranks,
+                    denomination_unite_legale=row["denomination_unite_legale"],
+                    nom_unite_legale=row["nom_unite_legale"],
+                    prenom1_unite_legale=row["prenom1_unite_legale"],
+                    enseigne1=row["enseigne1"],
+                    enseigne2=row["enseigne2"],
+                    enseigne3=row["enseigne3"],
                 )
                 normalized.append(norm)
                 log.debug("SIRET %s: found 1 row", value)
@@ -304,14 +323,16 @@ def enrich_candidates_from_sirene(
         if key_type == "siren":
             # Active establishments first
             rows = conn.execute(
-                "SELECT siret, siren, denomination, address_full, postcode, city, insee_code, legal_nature, etat_administratif "
+                "SELECT siret, siren, denomination, address_full, postcode, city, insee_code, legal_nature, etat_administratif, "
+                "denomination_unite_legale, nom_unite_legale, prenom1_unite_legale, enseigne1, enseigne2, enseigne3 "
                 "FROM establishments WHERE siren = ? AND etat_administratif = 'A' LIMIT 20",
                 (value,),
             ).fetchall()
 
             if not rows:
                 rows = conn.execute(
-                    "SELECT siret, siren, denomination, address_full, postcode, city, insee_code, legal_nature, etat_administratif "
+                    "SELECT siret, siren, denomination, address_full, postcode, city, insee_code, legal_nature, etat_administratif, "
+                    "denomination_unite_legale, nom_unite_legale, prenom1_unite_legale, enseigne1, enseigne2, enseigne3 "
                     "FROM establishments WHERE siren = ? LIMIT 20",
                     (value,),
                 ).fetchall()
@@ -351,6 +372,12 @@ def enrich_candidates_from_sirene(
                     raw_candidates=raw_candidates,
                     category=map_legal_to_category(row["legal_nature"], log),
                     web_ranks=web_ranks,
+                    denomination_unite_legale=row["denomination_unite_legale"],
+                    nom_unite_legale=row["nom_unite_legale"],
+                    prenom1_unite_legale=row["prenom1_unite_legale"],
+                    enseigne1=row["enseigne1"],
+                    enseigne2=row["enseigne2"],
+                    enseigne3=row["enseigne3"],
                 )
                 normalized.append(norm)
             continue

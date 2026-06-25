@@ -120,7 +120,26 @@ class CandidateName:
     is_sigle: bool
 
 
-def normalize_text(text: str | None, *, uppercase: bool = True) -> str:
+_ACCENT_TRANSLATION_TABLE = str.maketrans({
+    "É": "E", "È": "E", "Ê": "E", "Ë": "E",
+    "à": "a", "â": "a", "ä": "a", "á": "a",
+    "é": "e", "è": "e", "ê": "e", "ë": "e",
+    "î": "i", "ï": "i", "í": "i",
+    "ô": "o", "ö": "o", "ó": "o",
+    "û": "u", "ü": "u", "ú": "u", "ù": "u",
+    "ç": "c",
+    "À": "A", "Â": "A", "Ä": "A", "Á": "A",
+    "Î": "I", "Ï": "I", "Í": "I",
+    "Ô": "O", "Ö": "O", "Ó": "O",
+    "Û": "U", "Ü": "U", "Ú": "U", "Ù": "U",
+    "Ç": "C",
+})
+
+
+from functools import lru_cache
+
+@lru_cache(maxsize=128000)
+def normalize_text(text: str | None, uppercase: bool = True) -> str:
     """Accent stripping + whitespace collapse. Uppercase is optional."""
     if text is None or (isinstance(text, float) and pd.isna(text)):
         return ""
@@ -134,23 +153,7 @@ def normalize_text(text: str | None, *, uppercase: bool = True) -> str:
         t = t.upper()
         
     t = t.replace("-", " ")
-    # Replace common french accents (both cases)
-    replacements = {
-        "É": "E", "È": "E", "Ê": "E", "Ë": "E",
-        "à": "a", "â": "a", "ä": "a", "á": "a",
-        "é": "e", "è": "e", "ê": "e", "ë": "e",
-        "î": "i", "ï": "i", "í": "i",
-        "ô": "o", "ö": "o", "ó": "o",
-        "û": "u", "ü": "u", "ú": "u", "ù": "u",
-        "ç": "c",
-        "À": "A", "Â": "A", "Ä": "A", "Á": "A",
-        "Î": "I", "Ï": "I", "Í": "I",
-        "Ô": "O", "Ö": "O", "Ó": "O",
-        "Û": "U", "Ü": "U", "Ú": "U", "Ù": "U",
-        "Ç": "C",
-    }
-    for old, new in replacements.items():
-        t = t.replace(old, new)
+    t = t.translate(_ACCENT_TRANSLATION_TABLE)
         
     return " ".join(t.split())
 
@@ -171,8 +174,16 @@ def truncate_name(text: str, max_len: int = 100) -> str:
     return cutoff
 
 
-def normalize_name(raw: str | None, *, max_len: int = 100, uppercase: bool = True) -> str:
+@lru_cache(maxsize=128000)
+def normalize_name(raw: str | None, max_len: int = 100, uppercase: bool = True) -> str:
     """Normalize name, optionally preserving case."""
+    if not raw or (isinstance(raw, float) and pd.isna(raw)):
+        return ""
+    if isinstance(raw, str):
+        raw_s = raw.strip()
+        if not raw_s or raw_s in ("[ND]", "[nd]", "ND", "nan", "NaN", "None"):
+            return ""
+            
     base = normalize_text(raw, uppercase=uppercase)
     if not base:
         return ""
@@ -222,12 +233,22 @@ def build_candidate_names(cand: dict) -> List[CandidateName]:
             return cached
 
     names: List[CandidateName] = []
+    seen = set()
 
     def add(val: str | None, source: NameSource, *, is_ul: bool = False, is_sigle: bool = False):
+        if not val or (isinstance(val, float) and pd.isna(val)):
+            return
+        if isinstance(val, str):
+            val_s = val.strip()
+            if not val_s or val_s in ("[ND]", "[nd]", "ND", "nan", "NaN", "None"):
+                return
         norm = normalize_name(val)
         # Ignore pure numeric or ultra-short tokens (e.g., "38") which are usually noise
         if norm and not norm.isdigit() and len(norm) > 2:
-            names.append(CandidateName(text=norm, source=source, is_ul_name=is_ul, is_sigle=is_sigle))
+            key = (norm, source, is_ul, is_sigle)
+            if key not in seen:
+                seen.add(key)
+                names.append(CandidateName(text=norm, source=source, is_ul_name=is_ul, is_sigle=is_sigle))
 
     # Etablissement level
     add(cand.get("enseigne1"), NameSource.ETAB_ENSEIGNE, is_ul=False)
@@ -240,6 +261,8 @@ def build_candidate_names(cand: dict) -> List[CandidateName]:
     if isinstance(pm_dirigeant_names, str):
         # V4 partitions store PM names as pipe-separated string
         pm_dirigeant_names = [n.strip() for n in pm_dirigeant_names.split("|") if n.strip()]
+    if pm_dirigeant_names:
+        pm_dirigeant_names = list(dict.fromkeys(pm_dirigeant_names))
     for val in pm_dirigeant_names:
         add(val, NameSource.PM_DIRIGEANT, is_ul=False)
 
@@ -277,35 +300,95 @@ def primary_name(cand: dict) -> str:
         if cached is not None:
             return cached
 
-    names = build_candidate_names(cand)
-    if not names:
-        return ""
-    
-    # Priority: ETAB > UL > PM_DIRIGEANT > PERSON
-    priority_sources = [
-        NameSource.ETAB_ENSEIGNE,
-        NameSource.ETAB_DENOM,
-        NameSource.ETAB_ENSEIGNE_X,
-        NameSource.UL_SIGLE,
-        NameSource.UL_DENOM_USUELLE,
-        NameSource.UL_DENOM,
-        NameSource.PM_DIRIGEANT,
-        NameSource.PERSON_NAME,
-    ]
-    
-    for source in priority_sources:
-        for nm in names:
-            if nm.source == source:
-                chosen = nm.text
+    # 1. ETAB_ENSEIGNE
+    val = cand.get("enseigne1")
+    if val:
+        norm = normalize_name(val)
+        if norm and not norm.isdigit() and len(norm) > 2:
+            if isinstance(cand, dict):
+                cand["_xgb_cached_primary_name"] = norm
+            return norm
+
+    # 2. ETAB_DENOM
+    val = cand.get("denomination")
+    if val:
+        norm = normalize_name(val)
+        if norm and not norm.isdigit() and len(norm) > 2:
+            if isinstance(cand, dict):
+                cand["_xgb_cached_primary_name"] = norm
+            return norm
+
+    # 3. ETAB_ENSEIGNE_X
+    for k in ("enseigne2", "enseigne3"):
+        val = cand.get(k)
+        if val:
+            norm = normalize_name(val)
+            if norm and not norm.isdigit() and len(norm) > 2:
                 if isinstance(cand, dict):
-                    cand["_xgb_cached_primary_name"] = chosen
-                return chosen
-    
-    # Fallback to first available
-    chosen = names[0].text
+                    cand["_xgb_cached_primary_name"] = norm
+                return norm
+
+    # 4. UL_SIGLE
+    val = cand.get("sigle_ul")
+    if val:
+        norm = normalize_name(val)
+        if norm and not norm.isdigit() and len(norm) > 2:
+            if isinstance(cand, dict):
+                cand["_xgb_cached_primary_name"] = norm
+            return norm
+
+    # 5. UL_DENOM_USUELLE
+    val = cand.get("denomination_usuelle_ul")
+    if val:
+        norm = normalize_name(val)
+        if norm and not norm.isdigit() and len(norm) > 2:
+            if isinstance(cand, dict):
+                cand["_xgb_cached_primary_name"] = norm
+            return norm
+
+    # 6. UL_DENOM
+    val = cand.get("denomination_ul")
+    if val:
+        norm = normalize_name(val)
+        if norm and not norm.isdigit() and len(norm) > 2:
+            if isinstance(cand, dict):
+                cand["_xgb_cached_primary_name"] = norm
+            return norm
+
+    # 7. PM_DIRIGEANT
+    pm_dirigeant_names = cand.get("pm_dirigeant_names") or []
+    if isinstance(pm_dirigeant_names, str):
+        pm_dirigeant_names = [n.strip() for n in pm_dirigeant_names.split("|") if n.strip()]
+    for val in pm_dirigeant_names:
+        norm = normalize_name(val)
+        if norm and not norm.isdigit() and len(norm) > 2:
+            if isinstance(cand, dict):
+                cand["_xgb_cached_primary_name"] = norm
+            return norm
+
+    # 8. PERSON_NAME
+    cj_ul = cand.get("cj_ul")
+    if cj_ul in PERSON_UL_CODES:
+        if cand.get("prenom_usuel_ul") or cand.get("nom_ul"):
+            person_fullname = " ".join(filter(None, [cand.get("prenom_usuel_ul"), cand.get("nom_ul")]))
+            if person_fullname:
+                norm = normalize_name(person_fullname)
+                if norm and not norm.isdigit() and len(norm) > 2:
+                    if isinstance(cand, dict):
+                        cand["_xgb_cached_primary_name"] = norm
+                    return norm
+
+    # Fallback
+    names = build_candidate_names(cand)
+    if names:
+        chosen = names[0].text
+        if isinstance(cand, dict):
+            cand["_xgb_cached_primary_name"] = chosen
+        return chosen
+
     if isinstance(cand, dict):
-        cand["_xgb_cached_primary_name"] = chosen
-    return chosen
+        cand["_xgb_cached_primary_name"] = ""
+    return ""
 
 
 def candidate_tfidf_text(cand: dict) -> str:

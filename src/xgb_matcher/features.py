@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 import re
+from functools import lru_cache
 from typing import Any, Dict, List, Mapping, Set
 
 import numpy as np
@@ -82,9 +83,9 @@ SEMANTIC_GATE_JARO_MIN = float(os.getenv("XGB_SEMANTIC_GATE_JARO_MIN", "0.50"))
 SEMANTIC_GATE_TOKEN_MIN = float(os.getenv("XGB_SEMANTIC_GATE_TOKEN_MIN", "0.20"))
 
 # Stopwords to down-weight generic name overlap (avoid LES/DU false positives)
-NAME_STOPWORDS: Set[str] = {
+NAME_STOPWORDS: frozenset[str] = frozenset({
     "LES", "DU", "DE", "LA", "LE", "DES", "D", "L", "AUX", "AU",
-}
+})
 
 # Global IDF map for name tokens (set by candidate loader)
 _GLOBAL_NAME_IDF: Dict[str, float] = {}
@@ -247,6 +248,7 @@ SCHOOL_TOKENS: Set[str] = {
 # --------------------------------------------------------------------------- #
 
 
+@lru_cache(maxsize=256000)
 def jaro_sim(a: str, b: str) -> float:
     """
     Compute Jaro-Winkler similarity between two strings.
@@ -260,6 +262,7 @@ def jaro_sim(a: str, b: str) -> float:
     return JaroWinkler.similarity(a, b)
 
 
+@lru_cache(maxsize=256000)
 def levenshtein_norm(a: str, b: str) -> float:
     """
     Compute normalized Levenshtein similarity (1 - distance/max_len).
@@ -487,37 +490,39 @@ def _address_density_for_candidate(crm: Mapping[str, Any], cand: dict) -> float:
 # --------------------------------------------------------------------------- #
 
 
-def _tokenize(
-    text: str,
-    *,
-    stopwords: Set[str] | None = None,
-    min_len: int = 1,
-) -> Set[str]:
-    """Split normalized text into set of tokens (words), with optional filtering."""
+@lru_cache(maxsize=256000)
+def _tokenize_cached(text: str, stopwords: frozenset[str] | None = None, min_len: int = 1) -> frozenset[str]:
+    """Internal helper to cache tokenization results with frozenset arguments."""
     if not text:
-        return set()
+        return frozenset()
     tokens = text.split()
     if stopwords:
         tokens = [t for t in tokens if t not in stopwords]
     if min_len > 1:
         tokens = [t for t in tokens if len(t) >= min_len]
-    return set(tokens)
+    return frozenset(tokens)
 
 
-def token_overlap(
+def _tokenize(
+    text: str,
+    *,
+    stopwords: Set[str] | frozenset[str] | None = None,
+    min_len: int = 1,
+) -> Set[str]:
+    """Split normalized text into set of tokens (words), with optional filtering."""
+    fs_stopwords = frozenset(stopwords) if stopwords is not None else None
+    return set(_tokenize_cached(text, fs_stopwords, min_len))
+
+
+@lru_cache(maxsize=256000)
+def _token_overlap_cached(
     a: str,
     b: str,
-    *,
-    stopwords: Set[str] | None = None,
+    stopwords: frozenset[str] | None = None,
     min_len: int = 1,
 ) -> float:
-    """
-    Compute ratio of common tokens between two strings.
-
-    Returns |A ∩ B| / |A ∪ B| (Jaccard similarity on tokens).
-    """
-    tokens_a = _tokenize(a, stopwords=stopwords, min_len=min_len)
-    tokens_b = _tokenize(b, stopwords=stopwords, min_len=min_len)
+    tokens_a = _tokenize_cached(a, stopwords, min_len)
+    tokens_b = _tokenize_cached(b, stopwords, min_len)
     if not tokens_a and not tokens_b:
         return 1.0
     if not tokens_a or not tokens_b:
@@ -527,6 +532,23 @@ def token_overlap(
     return len(intersection) / len(union)
 
 
+def token_overlap(
+    a: str,
+    b: str,
+    *,
+    stopwords: Set[str] | frozenset[str] | None = None,
+    min_len: int = 1,
+) -> float:
+    """
+    Compute ratio of common tokens between two strings.
+
+    Returns |A ∩ B| / |A ∪ B| (Jaccard similarity on tokens).
+    """
+    fs_stopwords = frozenset(stopwords) if stopwords is not None else None
+    return _token_overlap_cached(a, b, fs_stopwords, min_len)
+
+
+@lru_cache(maxsize=256000)
 def first_word_match(a: str, b: str) -> int:
     """
     Check if the first word of both strings matches.
@@ -542,6 +564,7 @@ def first_word_match(a: str, b: str) -> int:
     return int(words_a[0] == words_b[0])
 
 
+@lru_cache(maxsize=256000)
 def contains_check(container: str, contained: str) -> int:
     """
     Check if container string contains the contained string.
@@ -557,8 +580,8 @@ def _idf_overlap(a: str, b: str) -> float:
     """Average IDF of overlapping name tokens (0 if no overlap or no IDF map)."""
     if not _GLOBAL_NAME_IDF:
         return 0.0
-    tokens_a = _tokenize(a, stopwords=NAME_STOPWORDS, min_len=2)
-    tokens_b = _tokenize(b, stopwords=NAME_STOPWORDS, min_len=2)
+    tokens_a = _tokenize_cached(a, NAME_STOPWORDS, 2)
+    tokens_b = _tokenize_cached(b, NAME_STOPWORDS, 2)
     if not tokens_a or not tokens_b:
         return 0.0
     overlap = tokens_a & tokens_b
@@ -567,15 +590,17 @@ def _idf_overlap(a: str, b: str) -> float:
     return sum(_GLOBAL_NAME_IDF.get(tok, _GLOBAL_NAME_IDF_DEFAULT) for tok in overlap) / len(overlap)
 
 
+@lru_cache(maxsize=256000)
 def numeric_token_match(a: str, b: str) -> float:
     """Overlap ratio of numeric tokens between two strings."""
-    nums_a = set(re.findall(r"\d+", a or ""))
-    nums_b = set(re.findall(r"\d+", b or ""))
+    nums_a = frozenset(re.findall(r"\d+", a or ""))
+    nums_b = frozenset(re.findall(r"\d+", b or ""))
     if not nums_a or not nums_b:
         return 0.0
     return len(nums_a & nums_b) / max(len(nums_a), len(nums_b))
 
 
+@lru_cache(maxsize=256000)
 def _extract_acronym(text: str) -> str:
     """Extract initials from a multi-word string, ignoring small words and common city names."""
     if not text:
@@ -601,6 +626,7 @@ def _extract_acronym(text: str) -> str:
     return "".join(initials)
 
 
+@lru_cache(maxsize=256000)
 def _is_acronym(text: str) -> bool:
     """Check if text looks like an acronym (2-6 uppercase letters, no spaces)."""
     if not text:
@@ -609,6 +635,7 @@ def _is_acronym(text: str) -> bool:
     return bool(re.match(r"^[A-Z]{2,6}$", text.replace(" ", "")))
 
 
+@lru_cache(maxsize=256000)
 def acronym_match(a: str, b: str) -> int:
     """
     Check if one string is the acronym of the other.
@@ -1041,8 +1068,8 @@ def make_features_from_preprocessed(
     # name_norm_exact: Exact match after normalization
     # Compare best candidate name (by jaro) to CRM name (both normalized)
     best_cand_name_text = ""
-    if candidate_names:
-        best_cand_name_text = max(candidate_names, key=lambda nm: jaro_sim(crm_name, nm.text)).text
+    if candidate_names and sims:
+        best_cand_name_text = max(sims, key=lambda x: x["jaro"])["nm"].text
     features["name_norm_exact"] = float(crm_name == best_cand_name_text and crm_name != "")
     
     # street_number_match: Street number exact match

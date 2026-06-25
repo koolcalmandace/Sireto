@@ -19,7 +19,7 @@ import pyarrow.parquet as pq
 from .blocking import normalize_code, department_from_code
 
 # Maximum number of entries per store cache (INSEE / CP / dept)
-_MAX_STORE_CACHE_SIZE = 5
+_MAX_STORE_CACHE_SIZE = 100
 
 # Columns actually used by features, naming, filtering, and output.
 # Excludes unused columns (nom_usage_ul, pseudonyme_ul) to reduce I/O and RAM.
@@ -114,10 +114,18 @@ class PartitionedCandidateStore:
             self._cache_insee_count[code] = count
             self._evict_lru(self._cache_insee_count, _MAX_STORE_CACHE_SIZE)
             return count
-        try:
-            count = self._dataset_insee.count_rows(filter=ds.field("insee") == code)
-        except Exception:
-            return 0
+        
+        dir_path = self.partitions_dir / "insee" / f"insee={code}"
+        if not dir_path.exists():
+            count = 0
+        else:
+            try:
+                count = sum(pq.read_metadata(f).num_rows for f in dir_path.glob("*.parquet"))
+            except Exception:
+                try:
+                    count = self._dataset_insee.count_rows(filter=ds.field("insee") == code)
+                except Exception:
+                    count = 0
         self._cache_insee_count[code] = int(count)
         self._evict_lru(self._cache_insee_count, _MAX_STORE_CACHE_SIZE)
         return int(count)
@@ -129,14 +137,32 @@ class PartitionedCandidateStore:
         if code in self._cache_insee:
             self._cache_insee.move_to_end(code)
             return self._cache_insee[code]
-        try:
-            table = self._dataset_insee.to_table(
-                filter=ds.field("insee") == code,
-                columns=self._columns_insee,
-            )
-        except Exception:
-            return []
-        rows = self._coerce_candidate_types(table.to_pylist())
+        
+        # Try direct parquet folder read first (O(1) file open vs dataset directory tree scan)
+        dir_path = self.partitions_dir / "insee" / f"insee={code}"
+        table = None
+        if dir_path.exists():
+            try:
+                # Omit partition column 'insee' to prevent pyarrow lookup failure
+                cols = [c for c in self._columns_insee if c != "insee"] if self._columns_insee else None
+                table = pq.read_table(dir_path, columns=cols)
+            except Exception:
+                table = None
+                
+        if table is None:
+            try:
+                table = self._dataset_insee.to_table(
+                    filter=ds.field("insee") == code,
+                    columns=self._columns_insee,
+                )
+                rows = self._coerce_candidate_types(table.to_pylist())
+            except Exception:
+                return []
+        else:
+            rows = self._coerce_candidate_types(table.to_pylist())
+            for r in rows:
+                r["insee"] = code
+                
         self._cache_insee[code] = rows
         self._evict_lru(self._cache_insee, _MAX_STORE_CACHE_SIZE)
         return rows
@@ -148,14 +174,32 @@ class PartitionedCandidateStore:
         if code in self._cache_cp:
             self._cache_cp.move_to_end(code)
             return self._cache_cp[code]
-        try:
-            table = self._dataset_cp.to_table(
-                filter=ds.field("postcode") == code,
-                columns=self._columns_cp,
-            )
-        except Exception:
-            return []
-        rows = self._coerce_candidate_types(table.to_pylist())
+        
+        # Try direct parquet folder read first
+        dir_path = self.partitions_dir / "cp" / f"postcode={code}"
+        table = None
+        if dir_path.exists():
+            try:
+                # Omit partition column 'postcode'
+                cols = [c for c in self._columns_cp if c != "postcode"] if self._columns_cp else None
+                table = pq.read_table(dir_path, columns=cols)
+            except Exception:
+                table = None
+                
+        if table is None:
+            try:
+                table = self._dataset_cp.to_table(
+                    filter=ds.field("postcode") == code,
+                    columns=self._columns_cp,
+                )
+                rows = self._coerce_candidate_types(table.to_pylist())
+            except Exception:
+                return []
+        else:
+            rows = self._coerce_candidate_types(table.to_pylist())
+            for r in rows:
+                r["postcode"] = code
+                
         self._cache_cp[code] = rows
         self._evict_lru(self._cache_cp, _MAX_STORE_CACHE_SIZE)
         return rows
@@ -169,15 +213,34 @@ class PartitionedCandidateStore:
         if cache_key in self._cache_cp_insee:
             self._cache_cp_insee.move_to_end(cache_key)
             return self._cache_cp_insee[cache_key]
-        try:
-            filt = (ds.field("postcode") == code_cp) & (ds.field("insee") == code_insee)
-            table = self._dataset_cp.to_table(
-                filter=filt,
-                columns=self._columns_cp,
-            )
-        except Exception:
-            return []
-        rows = self._coerce_candidate_types(table.to_pylist())
+        
+        # Try direct parquet folder read first
+        dir_path = self.partitions_dir / "cp" / f"postcode={code_cp}"
+        table = None
+        if dir_path.exists():
+            try:
+                # Omit partition column 'postcode'
+                cols = [c for c in self._columns_cp if c != "postcode"] if self._columns_cp else None
+                table = pq.read_table(dir_path, columns=cols)
+                table = table.filter(pa.compute.field("insee") == code_insee)
+            except Exception:
+                table = None
+                
+        if table is None:
+            try:
+                filt = (ds.field("postcode") == code_cp) & (ds.field("insee") == code_insee)
+                table = self._dataset_cp.to_table(
+                    filter=filt,
+                    columns=self._columns_cp,
+                )
+                rows = self._coerce_candidate_types(table.to_pylist())
+            except Exception:
+                return []
+        else:
+            rows = self._coerce_candidate_types(table.to_pylist())
+            for r in rows:
+                r["postcode"] = code_cp
+                
         self._cache_cp_insee[cache_key] = rows
         self._evict_lru(self._cache_cp_insee, _MAX_STORE_CACHE_SIZE)
         return rows

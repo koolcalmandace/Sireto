@@ -499,7 +499,7 @@ def _normalize_crm_entry_rule_based(
 
     # Guess category
     name_upper = normalized_name.upper()
-    if any(k in name_upper for k in ["COLLEGE", "MAIRIE", "ECOLE", "UNIVERSITE", "LYCEE", "PUBLIC", "COMMUNE", "SNCF", "RATP", "LA POSTE"]):
+    if any(k in name_upper for k in ["COLLEGE", "MAIRIE", "ECOLE", "UNIVERSITE", "LYCEE", "PUBLIC", "COMMUNE", "SNCF", "RATP", "LA POSTE", "SITIV"]):
         category = "PUBLIC"
     elif any(k in name_upper for k in ["ARMOIRE", "NRO", "ABRI", "STATION", "PARKING", "ECLAIRAGE", "PYLONE", "TRANSFORMATEUR"]):
         category = "EQUIPEMENT_URBAIN"

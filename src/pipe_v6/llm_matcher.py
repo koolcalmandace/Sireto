@@ -159,6 +159,7 @@ def filter_candidates_by_category(
     candidates: list[NormalizedCandidate],
     config: PipelineConfig,
     logger: logging.Logger | None = None,
+    norm_entry: NormalizedCRMEntry | None = None,
 ) -> list[NormalizedCandidate]:
     """
     Filter candidates according to CRM category with optional fallback.
@@ -170,7 +171,7 @@ def filter_candidates_by_category(
     - INCONNU -> no filtering
     - If filtering disabled in config -> no filtering
     - If filtered list is empty but original non-empty and fallback enabled -> use all candidates
-    - Limit final list to config.max_candidates_llm_matcher, ordered by source count desc.
+    - Limit final list to config.max_candidates_llm_matcher, ordered by source count desc or relevance.
     """
 
     log = logger or LOGGER
@@ -199,14 +200,81 @@ def filter_candidates_by_category(
             filtered = list(candidates)
 
     if len(filtered) > config.max_candidates_llm_matcher:
-        filtered = sorted(filtered, key=lambda c: len(c.sources), reverse=True)[
-            : config.max_candidates_llm_matcher
-        ]
-        log.info(
-            "Too many candidates (%d), keeping top %d by source count.",
-            len(candidates),
-            config.max_candidates_llm_matcher,
-        )
+        if norm_entry:
+            # Clean CRM fields for relevance heuristic
+            crm_name_raw = norm_entry.normalized_name.upper()
+            crm_addr_raw = norm_entry.normalized_address.upper()
+
+            def clean_name_local(s: str) -> str:
+                s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii").upper()
+                s = re.sub(r"\s+", " ", s).strip()
+                for tok in ["SAS", "SARL", "SASU", "SA", "ASSOCIATION", "ENTREPRISE", "SOCIETE", "AGENCE", "SITE", "BUREAU", "ANTENNE", "DELEGATION", "DIRECTION", "SERVICE", "INTERNATIONAL", "FRANCE", "GROUP", "GROUPE", "HOLDING", "DEVELOPPEMENT", "DISTRIBUTION", "EUROPE"]:
+                    s = re.sub(r"\b" + tok + r"\b", "", s)
+                s = re.sub(r"[^A-Z0-9]", "", s)
+                return s
+
+            def clean_street_name_local(addr_str: str) -> str:
+                tokens = addr_str.upper().split()
+                street_types = {"RUE", "AVENUE", "BOULEVARD", "ALLEE", "ROUTE", "CHEMIN", "PLACE", "SQUARE", "IMPASSE", "COURS", "AV", "BD", "R", "RTE", "PL"}
+                filtered_toks = []
+                for t in tokens:
+                    if t in street_types:
+                        continue
+                    if re.match(r"^\d+$", t):  # number or postcode
+                        continue
+                    filtered_toks.append(t)
+                res = "".join(filtered_toks)
+                res = re.sub(r"[^A-Z0-9]", "", res)
+                return res
+
+            crm_name_clean = clean_name_local(crm_name_raw)
+            crm_street_sig = clean_street_name_local(crm_addr_raw)
+
+            def get_relevance_score(c: NormalizedCandidate) -> float:
+                name_variants = [c.name, getattr(c, "denomination_unite_legale", None)]
+                name_variants = [v for v in name_variants if v]
+                max_ratio = 0.0
+                for v in name_variants:
+                    v_clean = clean_name_local(v)
+                    if v_clean:
+                        ratio = SequenceMatcher(None, crm_name_clean, v_clean).ratio()
+                        if len(crm_name_clean) >= 3 and (crm_name_clean in v_clean or v_clean in crm_name_clean):
+                            ratio = max(ratio, 0.80)
+                        if ratio > max_ratio:
+                            max_ratio = ratio
+
+                cand_addr = f"{c.address or ''} {c.postcode or ''}".strip().upper()
+                cand_addr_clean = unicodedata.normalize("NFKD", cand_addr).encode("ascii", "ignore").decode("ascii")
+                cand_addr_clean = re.sub(r"[^A-Z0-9 ]", "", cand_addr_clean)
+                cand_street_sig = clean_street_name_local(cand_addr_clean)
+
+                addr_ratio = 0.0
+                if crm_street_sig and cand_street_sig:
+                    if crm_street_sig == cand_street_sig:
+                        addr_ratio = 1.0
+                    elif crm_street_sig in cand_street_sig or cand_street_sig in crm_street_sig:
+                        addr_ratio = 0.8
+
+                source_score = len(c.sources) * 0.01
+                return max_ratio * 0.5 + addr_ratio * 0.5 + source_score
+
+            filtered = sorted(filtered, key=get_relevance_score, reverse=True)[
+                : config.max_candidates_llm_matcher
+            ]
+            log.info(
+                "Too many candidates (%d), keeping top %d by relevance score.",
+                len(candidates),
+                config.max_candidates_llm_matcher,
+            )
+        else:
+            filtered = sorted(filtered, key=lambda c: len(c.sources), reverse=True)[
+                : config.max_candidates_llm_matcher
+            ]
+            log.info(
+                "Too many candidates (%d), keeping top %d by source count.",
+                len(candidates),
+                config.max_candidates_llm_matcher,
+            )
 
     return filtered
 
@@ -307,7 +375,7 @@ def _decide_match_rule_based(
     def clean_name(s: str) -> str:
         s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii").upper()
         s = re.sub(r"\s+", " ", s).strip()
-        for tok in ["SAS", "SARL", "SASU", "SA", "ASSOCIATION", "ENTREPRISE", "SOCIETE", "AGENCE", "SITE", "BUREAU", "ANTENNE", "DELEGATION", "DIRECTION", "SERVICE"]:
+        for tok in ["SAS", "SARL", "SASU", "SA", "ASSOCIATION", "ENTREPRISE", "SOCIETE", "AGENCE", "SITE", "BUREAU", "ANTENNE", "DELEGATION", "DIRECTION", "SERVICE", "INTERNATIONAL", "FRANCE", "GROUP", "GROUPE", "HOLDING", "DEVELOPPEMENT", "DISTRIBUTION", "EUROPE"]:
             s = re.sub(r"\b" + tok + r"\b", "", s)
         # Collapse: remove all spaces, punctuation, and non-alphanumeric characters
         s = re.sub(r"[^A-Z0-9]", "", s)
@@ -331,7 +399,68 @@ def _decide_match_rule_based(
         crm_addr_clean = re.sub(r"[^A-Z0-9 ]", "", crm_addr_clean)
         crm_addr_clean = re.sub(r"\s+", " ", crm_addr_clean).strip()
 
+        # Clean street name sig helper
+        def clean_street_name_only(addr_str: str) -> str:
+            tokens = addr_str.upper().split()
+            street_types = {"RUE", "AVENUE", "BOULEVARD", "ALLEE", "ROUTE", "CHEMIN", "PLACE", "SQUARE", "IMPASSE", "COURS", "AV", "BD", "R", "RTE", "PL"}
+            filtered = []
+            for t in tokens:
+                if t in street_types:
+                    continue
+                if re.match(r"^\d+$", t): # number or postcode
+                    continue
+                filtered.append(t)
+            res = "".join(filtered)
+            res = re.sub(r"[^A-Z0-9]", "", res)
+            return res
+
+        # Street number helper
+        def get_street_number(addr_str: str) -> str:
+            tokens = addr_str.split()
+            if tokens and re.match(r"^\d+$", tokens[0]) and tokens[0] != "0":
+                return tokens[0]
+            for t in tokens:
+                if re.match(r"^\d+$", t) and t != "0" and len(t) < 5:
+                    return t
+            return ""
+
+        crm_street_sig = clean_street_name_only(crm_addr_clean)
+        cand_street_sig = clean_street_name_only(cand_addr_clean)
+
+        crm_pc_match = re.search(r"\b\d{5}\b", crm_addr_clean)
+        cand_pc_match = re.search(r"\b\d{5}\b", cand_addr_clean)
+        pc_match = False
+        if crm_pc_match and cand_pc_match:
+            pc_match = (crm_pc_match.group(0)[:2] == cand_pc_match.group(0)[:2])
+
+        street_sig_match = False
+        if crm_street_sig and cand_street_sig:
+            if crm_street_sig == cand_street_sig:
+                street_sig_match = True
+            elif len(crm_street_sig) >= 5 and len(cand_street_sig) >= 5:
+                if crm_street_sig in cand_street_sig or cand_street_sig in crm_street_sig:
+                    street_sig_match = True
+                else:
+                    sig_ratio = SequenceMatcher(None, crm_street_sig, cand_street_sig).ratio()
+                    if sig_ratio > 0.60:
+                        street_sig_match = True
+
+        crm_num = get_street_number(crm_addr_clean)
+        cand_num = get_street_number(cand_addr_clean)
+        
+        # Check if numbers match or are within tolerance (difference <= 2)
+        num_match = False
+        if not crm_num or not cand_num:
+            num_match = True
+        else:
+            try:
+                num_match = abs(int(crm_num) - int(cand_num)) <= 2
+            except ValueError:
+                num_match = (crm_num == cand_num)
+
         if crm_addr_clean and cand_addr_clean == crm_addr_clean:
+            address_score = 0.50
+        elif street_sig_match and pc_match and num_match:
             address_score = 0.50
         else:
             addr_ratio = SequenceMatcher(None, crm_addr_clean, cand_addr_clean).ratio() if crm_addr_clean and cand_addr_clean else 0.0
@@ -344,20 +473,51 @@ def _decide_match_rule_based(
             else:
                 address_score = 0.0
 
-        # 2. Name matching
-        cand_name_clean = clean_name(cand.name or "")
-        if crm_name_clean and cand_name_clean == crm_name_clean:
-            name_score = 0.30
-        else:
-            name_ratio = SequenceMatcher(None, crm_name_clean, cand_name_clean).ratio() if crm_name_clean and cand_name_clean else 0.0
-            if name_ratio > 0.80:
-                name_score = 0.30
-            elif name_ratio > 0.55:
-                name_score = 0.20
-            elif name_ratio > 0.30:
-                name_score = 0.10
+        # 2. Name matching across multiple variants (denomination, enseigne, etc.)
+        name_variants = [
+            cand.name,
+            getattr(cand, "denomination_unite_legale", None),
+            getattr(cand, "enseigne1", None),
+            getattr(cand, "enseigne2", None),
+            getattr(cand, "enseigne3", None),
+        ]
+        if getattr(cand, "nom_unite_legale", None):
+            if getattr(cand, "prenom1_unite_legale", None):
+                name_variants.append(f"{cand.nom_unite_legale} {cand.prenom1_unite_legale}")
             else:
-                name_score = 0.0
+                name_variants.append(cand.nom_unite_legale)
+
+        name_variants = [v for v in name_variants if v]
+        clean_variants = [clean_name(v) for v in name_variants]
+
+        max_name_ratio = 0.0
+        is_exact_name = False
+        is_substring_name = False
+
+        for v_clean in clean_variants:
+            if not v_clean:
+                continue
+            if crm_name_clean == v_clean:
+                is_exact_name = True
+                max_name_ratio = 1.0
+                break
+            ratio = SequenceMatcher(None, crm_name_clean, v_clean).ratio()
+            if len(crm_name_clean) >= 3 and (crm_name_clean in v_clean or v_clean in crm_name_clean):
+                ratio = max(ratio, 0.80)
+                is_substring_name = True
+            if ratio > max_name_ratio:
+                max_name_ratio = ratio
+
+        if is_exact_name:
+            name_score = 0.30
+        elif max_name_ratio > 0.80 or is_substring_name:
+            name_score = 0.30
+        elif max_name_ratio > 0.55:
+            name_score = 0.20
+        elif max_name_ratio > 0.30:
+            name_score = 0.10
+        else:
+            name_score = 0.0
 
         # 3. Multi-source
         multisource_score = 0.20 if len(cand.sources) >= 2 else 0.0
@@ -366,13 +526,57 @@ def _decide_match_rule_based(
         category_score = 0.10 if cand.category == crm_category else 0.0
 
         conf = address_score + name_score + multisource_score + category_score
+
+        # Boost confidence if exact/very close address AND name matches moderately well
+        if address_score == 0.50 and (max_name_ratio >= 0.50 or is_substring_name):
+            conf += 0.20
+
+        # Boost confidence if exact name match in the same postcode
+        crm_pc = crm_pc_match.group(0) if crm_pc_match else ""
+        cand_pc = cand_pc_match.group(0) if cand_pc_match else ""
+        if is_exact_name and crm_pc and cand_pc and crm_pc == cand_pc:
+            conf += 0.05
+
+        # Boost Sitiv/Commune mapping
+        if "SITIV" in crm_name_raw:
+            cand_name_upper = cand.name.upper() if cand.name else ""
+            if "COMMUNE" in cand_name_upper or "MAIRIE" in cand_name_upper:
+                if address_score == 0.50:
+                    conf = max(conf, 0.85)
+
+        # Check if there is an exact name candidate in the candidate pool
+        # and if the current candidate has a low name match and no specific street number match
+        has_any_exact_name = any(
+            any(crm_name_clean == clean_name(v) for v in [
+                c.name,
+                getattr(c, "denomination_unite_legale", None),
+                getattr(c, "enseigne1", None),
+                getattr(c, "enseigne2", None),
+                getattr(c, "enseigne3", None),
+            ] if v)
+            for c in candidates
+        )
+
+        is_street_number_match = (crm_num and cand_num and crm_num == cand_num and crm_num != "0")
+        if has_any_exact_name and not is_exact_name and max_name_ratio < 0.60:
+            if not is_street_number_match:
+                conf -= 0.20
+
+        # Tiny tie-breaker boost for physical street number matches
+        if is_street_number_match:
+            conf += 0.01
+
         conf = max(0.0, min(1.0, conf))
 
         # Check if this is the best so far
         if conf > best_conf:
             best_conf = conf
             best_candidate = cand
-            best_reason = f"Rule-based match (addr_score={address_score:.2f}, name_score={name_score:.2f}, multi_source={len(cand.sources)}, cat_score={category_score:.2f})"
+            best_reason = (
+                f"Rule-based match (addr_score={address_score:.2f}, "
+                f"name_score={name_score:.2f} [max_ratio={max_name_ratio:.2f}], "
+                f"multi_source={len(cand.sources)}, cat_score={category_score:.2f})"
+            )
 
     if best_candidate and best_conf >= 0.20:
         return LLMMatchDecision(

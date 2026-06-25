@@ -308,16 +308,29 @@ def main() -> None:
     zero_features: List[str] = []
     ranker_feature_order: List[str] = FEATURE_NAMES
     ranker_fast_feature_order: List[str] = []
-    if args.ranker_meta and args.ranker_meta.exists():
-        meta = _load_meta(args.ranker_meta)
-        feature_order = meta.get("feature_order") or meta.get("feature_names") or FEATURE_NAMES
-        ranker_feature_order = meta.get("ranker_feature_order") or feature_order
-        ranker_fast_feature_order = meta.get("ranker_fast_feature_order") or []
-        zero_features = meta.get("semantic_features_zeroed_for_ranker_fast") or []
+    ranker_meta_dict = {}
+    ranker_meta_path = args.ranker_meta
+    if not ranker_meta_path:
+        # Find latest xgb_two_stage_meta_*.json in output_dir
+        candidates = sorted(args.output_dir.glob("xgb_two_stage_meta_*.json"), reverse=True)
+        if candidates:
+            ranker_meta_path = candidates[0]
+            print(f"Auto-resolved latest ranker meta: {ranker_meta_path}")
+
+    if ranker_meta_path and ranker_meta_path.exists():
+        ranker_meta_dict = _load_meta(ranker_meta_path)
+        feature_order = ranker_meta_dict.get("feature_order") or ranker_meta_dict.get("feature_names") or FEATURE_NAMES
+        ranker_feature_order = ranker_meta_dict.get("ranker_feature_order") or feature_order
+        ranker_fast_feature_order = ranker_meta_dict.get("ranker_fast_feature_order") or []
+        zero_features = ranker_meta_dict.get("semantic_features_zeroed_for_ranker_fast") or []
         if not args.ranker_model:
-            ranker_path = meta.get("ranker_fast_model") or meta.get("ranker_model")
-            if ranker_path:
-                args.ranker_model = Path(ranker_path)
+            ranker_path_str = ranker_meta_dict.get("ranker_model") or ranker_meta_dict.get("ranker_fast_model")
+            if ranker_path_str:
+                resolved = ranker_meta_path.parent / Path(ranker_path_str).name
+                if resolved.exists():
+                    args.ranker_model = resolved
+                else:
+                    args.ranker_model = Path(ranker_path_str)
 
     if args.ranker_model and args.ranker_model.exists():
         ranker = xgb.Booster()
@@ -396,15 +409,19 @@ def main() -> None:
             pickle.dump(calibrator, f)
 
     samples_meta = _load_samples_meta(args.samples)
-    config_raw = samples_meta.get("retrieval_config_v1")
     sig_raw = samples_meta.get("retrieval_signature_v1")
+    config_raw = samples_meta.get("retrieval_config_v1") or (sig_raw.get("config") if sig_raw else None)
     if not config_raw or not sig_raw:
         raise RuntimeError("Missing retrieval_config_v1 or retrieval_signature_v1 in samples metadata.")
     retrieval_config = RetrievalConfigV1.from_dict(config_raw)
     retrieval_signature = RetrievalSignatureV1.from_dict(sig_raw)
     if not retrieval_signature.matches(retrieval_config):
         raise RuntimeError("Retrieval signature mismatch in samples metadata.")
-    meta = _load_meta(meta_path)
+    meta = {}
+    if ranker_meta_dict:
+        meta.update(ranker_meta_dict)
+    if meta_path.exists():
+        meta.update(_load_meta(meta_path))
     meta.update(
         {
             "timestamp": timestamp,

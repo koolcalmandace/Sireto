@@ -231,6 +231,7 @@ def build_candidate_pool(
     timer: Optional["PipelineTimer"] = None,
     siren_global_index: Optional[Any] = None,
     siren_to_geo: Optional[Any] = None,
+    partition_cache: Optional[Dict[Any, Any]] = None,
 ) -> CandidatePoolResult:
     """Build candidate pool with unified code-path for train and inference.
 
@@ -330,54 +331,135 @@ def build_candidate_pool(
         return result
 
     # === V7: Standard geo-partitioned retrieval (default) ===
-    # Step 1: Load base candidates (strict insee_then_postcode + mega policy)
-    if timer:
-        with timer.stage("partition_load"):
+    # Check partition cache for pre-computed filtered/deduped pool and indexes
+    cache_key = (partition_key, config.include_closed, config.drop_unnamed)
+    cache_hit = False
+    
+    if partition_cache is not None and cache_key in partition_cache:
+        # Move key to end for LRU cache behavior
+        if hasattr(partition_cache, "move_to_end"):
+            try:
+                partition_cache.move_to_end(cache_key)
+            except Exception:
+                pass
+        
+        cached_data = partition_cache[cache_key]
+        pool_list = cached_data["pool_list"]
+        pool = cached_data.get("pool")
+        if pool is None:
+            pool = {str(c.get("siret") or "").zfill(14): c for c in pool_list if c.get("siret")}
+        idf_map = cached_data["idf_map"]
+        default_idf = cached_data["default_idf"]
+        addr_index = cached_data["addr_index"]
+        num_index = cached_data["num_index"]
+        tfidf_artifacts = cached_data["tfidf_artifacts"]
+        
+        result.pool_sizes["base"] = cached_data["pool_sizes"]["base"]
+        result.pool_sizes["filtered"] = cached_data["pool_sizes"]["filtered"]
+        result.gt_in_base_pool = _check_siret_in_list(pool_list, gt_norm)
+        result.gt_in_filtered_pool = gt_norm in _get_siret_set(pool_list) if gt_norm else False
+        result.idf_map = idf_map
+        result.default_idf = default_idf
+        
+        if result.gt_in_base_pool and not result.gt_in_filtered_pool:
+            if not config.include_closed:
+                result.loss_reason = "FILTERED_CLOSED"
+            elif config.drop_unnamed:
+                result.loss_reason = "FILTERED_UNNAMED"
+            else:
+                result.loss_reason = "FILTERED_OTHER"
+                
+        cache_hit = True
+    else:
+        # Step 1: Load base candidates (strict insee_then_postcode + mega policy)
+        if timer:
+            with timer.stage("partition_load"):
+                base_candidates = store.load_by_insee_then_postcode(
+                    insee,
+                    postcode,
+                    mega_insee_max_rows=config.mega_insee_max_rows,
+                    mega_insee_policy=config.mega_insee_policy,
+                )
+        else:
             base_candidates = store.load_by_insee_then_postcode(
                 insee,
                 postcode,
                 mega_insee_max_rows=config.mega_insee_max_rows,
                 mega_insee_policy=config.mega_insee_policy,
             )
-    else:
-        base_candidates = store.load_by_insee_then_postcode(
-            insee,
-            postcode,
-            mega_insee_max_rows=config.mega_insee_max_rows,
-            mega_insee_policy=config.mega_insee_policy,
-        )
 
-    result.pool_sizes["base"] = len(base_candidates)
-    result.gt_in_base_pool = _check_siret_in_list(base_candidates, gt_norm)
+        result.pool_sizes["base"] = len(base_candidates)
+        result.gt_in_base_pool = _check_siret_in_list(base_candidates, gt_norm)
 
-    # Step 2: Apply filters + dedupe
-    filtered = _apply_filters(base_candidates, config.drop_unnamed, config.include_closed)
-    pool = dedupe_candidates(filtered)
-    pool_list = list(pool.values())
+        # Step 2: Apply filters + dedupe
+        filtered = _apply_filters(base_candidates, config.drop_unnamed, config.include_closed)
+        pool = dedupe_candidates(filtered)
+        pool_list = list(pool.values())
 
-    result.pool_sizes["filtered"] = len(pool_list)
-    result.gt_in_filtered_pool = gt_norm in _get_siret_set(pool_list) if gt_norm else False
+        result.pool_sizes["filtered"] = len(pool_list)
+        result.gt_in_filtered_pool = gt_norm in _get_siret_set(pool_list) if gt_norm else False
 
-    candidates_dict = {str(c.get("siret") or ""): c for c in pool_list if c.get("siret")}
-    if candidates_dict:
-        idf_map, default_idf = compute_name_idf_map(candidates_dict)
-        result.idf_map = idf_map
-        result.default_idf = float(default_idf)
+        candidates_dict = {str(c.get("siret") or ""): c for c in pool_list if c.get("siret")}
+        idf_map = {}
+        default_idf = 0.0
+        if candidates_dict:
+            idf_map_raw, default_idf_raw = compute_name_idf_map(candidates_dict)
+            idf_map = idf_map_raw
+            default_idf = float(default_idf_raw)
+            result.idf_map = idf_map
+            result.default_idf = default_idf
 
-    if result.gt_in_base_pool and not result.gt_in_filtered_pool:
-        if not config.include_closed:
-            result.loss_reason = "FILTERED_CLOSED"
-        elif config.drop_unnamed:
-            result.loss_reason = "FILTERED_UNNAMED"
-        else:
-            result.loss_reason = "FILTERED_OTHER"
+        if result.gt_in_base_pool and not result.gt_in_filtered_pool:
+            if not config.include_closed:
+                result.loss_reason = "FILTERED_CLOSED"
+            elif config.drop_unnamed:
+                result.loss_reason = "FILTERED_UNNAMED"
+            else:
+                result.loss_reason = "FILTERED_OTHER"
 
-    # Step 3: Universal rescue whitelist (addr_hash + numeric tokens)
+        # Step 3: Universal rescue whitelist (addr_hash + numeric tokens)
+        addr_index = {}
+        num_index = {}
+        if pool_list:
+            addr_index = build_address_hash_index(pool_list)
+            num_index = build_numeric_token_index(pool_list)
+
+        # Build TF-IDF artifacts to cache
+        tfidf_artifacts = None
+        if config.sparse_retrieval_enabled and pool_list:
+            tfidf_artifacts = _get_tfidf_artifacts(
+                pool_list, config, tfidf_cache, ("main", partition_key),
+                persistent_cache=persistent_cache,
+                partition_key=partition_key,
+                timer=timer,
+            )
+
+        # Save to partition cache
+        if partition_cache is not None:
+            partition_cache[cache_key] = {
+                "pool_list": pool_list,
+                "pool": pool,
+                "idf_map": idf_map,
+                "default_idf": default_idf,
+                "addr_index": addr_index,
+                "num_index": num_index,
+                "tfidf_artifacts": tfidf_artifacts,
+                "pool_sizes": {
+                    "base": result.pool_sizes.get("base", 0),
+                    "filtered": result.pool_sizes.get("filtered", 0),
+                }
+            }
+            # Limit cache size to 3 (due to geometric sorting, keeping a huge cache is unnecessary and causes thrashed memory swap)
+            if len(partition_cache) > 3:
+                if hasattr(partition_cache, "popitem"):
+                    partition_cache.popitem(last=False)
+                else:
+                    first_key = next(iter(partition_cache))
+                    partition_cache.pop(first_key)
+
+    # Step 3: Universal rescue whitelist (addr_hash + numeric tokens) - query specific
     whitelisted_sirets: set[str] = set()
     if pool_list:
-        addr_index = build_address_hash_index(pool_list)
-        num_index = build_numeric_token_index(pool_list)
-
         addr_h = address_hash(
             crm_pre.get("crm_street_num"),
             crm_pre.get("crm_street_name"),
@@ -401,18 +483,19 @@ def build_candidate_pool(
     # Step 4: Prefilter — hybrid sparse (TF-IDF) + dense (FAISS) + rescue
     candidates = pool_list
     if config.prefilter_k and len(candidates) > config.prefilter_k:
-        cache_key = ("main", f"{insee}_{postcode}")
+        tfidf_cache_key = ("main", f"{insee}_{postcode}")
 
         # 4a. Sparse retrieval (TF-IDF) — with persistent cache
         sparse_idx: List[int] = []
         if config.sparse_retrieval_enabled:
-            artifacts = _get_tfidf_artifacts(
-                candidates, config, tfidf_cache, cache_key,
-                persistent_cache=persistent_cache,
-                partition_key=partition_key,
-                timer=timer,
-            )
-            name_vec, name_mat, names, char_vec, char_mat, addr_vec, addr_mat = artifacts
+            if tfidf_artifacts is None:
+                tfidf_artifacts = _get_tfidf_artifacts(
+                    candidates, config, tfidf_cache, tfidf_cache_key,
+                    persistent_cache=persistent_cache,
+                    partition_key=partition_key,
+                    timer=timer,
+                )
+            name_vec, name_mat, names, char_vec, char_mat, addr_vec, addr_mat = tfidf_artifacts
 
             name_idx: List[int] = []
             if name_vec is not None and name_mat is not None:

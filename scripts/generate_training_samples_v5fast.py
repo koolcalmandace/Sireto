@@ -124,68 +124,134 @@ SAMPLE_SCHEMA = pa.schema([
 class StreamingParquetWriter:
     def __init__(self, output_path: Path, schema: pa.Schema, flush_every: int = DEFAULT_FLUSH_EVERY, *, append_from: Optional[Path] = None):
         self.output_path = output_path
+        self.jsonl_path = output_path.with_suffix(".jsonl")
         self.schema = schema
         self.flush_every = flush_every
-        self._writer: Optional[pq.ParquetWriter] = None
-        self._append_from = append_from
-        self._buffers: Dict[str, List[Any]] = {field.name: [] for field in schema}
-        self._count = 0
+        self._buffers: List[Dict[str, Any]] = []
         self._total_written = 0
         self._semantic_nonzero_count = 0
         self._total_samples = 0
-        if self._append_from is not None:
-            self._initialize_with_existing(self._append_from)
-    
+        from collections import defaultdict
+        self._split_counts: Dict[str, Tuple[int, int]] = defaultdict(lambda: (0, 0))
+        self._file_handle = None
+
+        self._scan_existing_jsonl()
+        self._file_handle = open(self.jsonl_path, "a", encoding="utf-8")
+        
+    def _scan_existing_jsonl(self) -> None:
+        if not self.jsonl_path.exists():
+            return
+        print(f"[Resume] Scanning existing temporary file: {self.jsonl_path}")
+        try:
+            with open(self.jsonl_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    sample = json.loads(line)
+                    self._total_written += 1
+                    self._total_samples += 1
+                    sem_max = sample.get("name_semantic_max", 0.0)
+                    if sem_max and sem_max > 0:
+                        self._semantic_nonzero_count += 1
+                    
+                    split = sample.get("split", "unknown")
+                    label = sample.get("label", 0)
+                    c, p = self._split_counts[split]
+                    self._split_counts[split] = (c + 1, p + (1 if label == 1 else 0))
+            print(f"[Resume] Loaded {self._total_samples} samples from existing run. Split counts: {dict(self._split_counts)}")
+        except Exception as e:
+            print(f"[WARNING] Failed to parse existing JSONL: {e}. Starting fresh.")
+            self.jsonl_path.unlink(missing_ok=True)
+            self._total_written = 0
+            self._total_samples = 0
+            self._semantic_nonzero_count = 0
+            self._split_counts.clear()
+
+    def get_split_counts(self, split_name: str) -> Tuple[int, int]:
+        return self._split_counts.get(split_name, (0, 0))
+
     def add_sample(self, sample: Dict[str, Any]) -> None:
+        normalized = {}
         for field in self.schema:
             val = sample.get(field.name)
             if val is None:
                 if field.type == pa.float32(): val = 0.0
                 elif field.type in (pa.int32(), pa.int64()): val = 0
                 else: val = ""
-            self._buffers[field.name].append(val)
-        self._count += 1
+            else:
+                if field.type == pa.float32(): val = float(val)
+                elif field.type in (pa.int32(), pa.int64()): val = int(val)
+                else: val = str(val)
+            normalized[field.name] = val
+            
+        self._buffers.append(normalized)
         self._total_samples += 1
-        sem_max = sample.get("name_semantic_max", 0.0)
-        if sem_max and sem_max > 0: self._semantic_nonzero_count += 1
-        if self._count >= self.flush_every: self.flush()
-    
-    def flush(self) -> None:
-        if self._count == 0: return
-        arrays = []
-        for field in self.schema:
-            data = self._buffers[field.name]
-            if field.type == pa.float32(): arr = pa.array(data, type=pa.float32())
-            elif field.type == pa.int32(): arr = pa.array(data, type=pa.int32())
-            elif field.type == pa.int64(): arr = pa.array(data, type=pa.int64())
-            else: arr = pa.array(data, type=pa.string())
-            arrays.append(arr)
-        table = pa.Table.from_arrays(arrays, schema=self.schema)
-        if self._writer is None: self._writer = pq.ParquetWriter(str(self.output_path), self.schema)
-        self._writer.write_table(table)
-        self._total_written += self._count
-        for key in self._buffers: self._buffers[key] = []
-        self._count = 0
+        
+        split = normalized.get("split", "unknown")
+        label = normalized.get("label", 0)
+        c, p = self._split_counts[split]
+        self._split_counts[split] = (c + 1, p + (1 if label == 1 else 0))
+        
+        sem_max = normalized.get("name_semantic_max", 0.0)
+        if sem_max and sem_max > 0:
+            self._semantic_nonzero_count += 1
+            
+        if len(self._buffers) >= self.flush_every:
+            self.flush()
 
-    def _initialize_with_existing(self, source_path: Path) -> None:
-        if not source_path.exists(): return
-        parquet_file = pq.ParquetFile(source_path)
-        if parquet_file.schema_arrow != self.schema:
-            raise RuntimeError("Resume schema mismatch")
-        self._writer = pq.ParquetWriter(str(self.output_path), self.schema)
-        for idx in range(parquet_file.num_row_groups):
-            table = parquet_file.read_row_group(idx)
-            self._writer.write_table(table)
-            self._total_written += table.num_rows
-            self._total_samples += table.num_rows
-            if "name_semantic_max" in table.schema.names:
-                col = table.column("name_semantic_max")
-                nonzero = pc.sum(pc.greater(col, 0)).as_py() or 0
-                self._semantic_nonzero_count += int(nonzero)
-    
+    def flush(self) -> None:
+        if not self._buffers:
+            return
+        if self._file_handle is None:
+            self._file_handle = open(self.jsonl_path, "a", encoding="utf-8")
+        for sample in self._buffers:
+            self._file_handle.write(json.dumps(sample, ensure_ascii=False) + "\n")
+        self._file_handle.flush()
+        self._total_written += len(self._buffers)
+        self._buffers.clear()
+
     def close(self) -> Tuple[int, float]:
         self.flush()
-        if self._writer is not None: self._writer.close()
+        if self._file_handle is not None:
+            self._file_handle.close()
+            self._file_handle = None
+        
+        # Compile JSONL to Parquet
+        if self.jsonl_path.exists() and self._total_samples > 0:
+            print(f"Compiling {self.jsonl_path} to final Parquet file: {self.output_path}")
+            try:
+                arrays = {field.name: [] for field in self.schema}
+                with open(self.jsonl_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        sample = json.loads(line)
+                        for field in self.schema:
+                            arrays[field.name].append(sample.get(field.name))
+                
+                pa_arrays = []
+                for field in self.schema:
+                    data = arrays[field.name]
+                    if field.type == pa.float32():
+                        arr = pa.array(data, type=pa.float32())
+                    elif field.type == pa.int32():
+                        arr = pa.array(data, type=pa.int32())
+                    elif field.type == pa.int64():
+                        arr = pa.array(data, type=pa.int64())
+                    else:
+                        arr = pa.array(data, type=pa.string())
+                    pa_arrays.append(arr)
+                
+                table = pa.Table.from_arrays(pa_arrays, schema=self.schema)
+                pq.write_table(table, str(self.output_path), compression="ZSTD")
+                print(f"Successfully compiled Parquet file: {self.output_path} ({self._total_samples} rows)")
+                self.jsonl_path.unlink()
+            except Exception as e:
+                print(f"[ERROR] Failed to compile Parquet from JSONL: {e}")
+                raise e
+        
         rate = self._semantic_nonzero_count / self._total_samples if self._total_samples > 0 else 0.0
         return self._total_written, rate
 
@@ -195,16 +261,17 @@ class ProgressTracker:
         self.progress_path = progress_path
         self.processed: Set[str] = set()
         if self.progress_path.exists():
-            with open(self.progress_path) as f:
+            with open(self.progress_path, "r", encoding="utf-8") as f:
                 for line in f: self.processed.add(line.strip())
     
     def is_processed(self, loc_key: str) -> bool: return loc_key in self.processed
     def mark_processed(self, loc_key: str) -> None:
         self.processed.add(loc_key)
-        with open(self.progress_path, "a") as f: f.write(f"{loc_key}\n")
+        with open(self.progress_path, "a", encoding="utf-8") as f: f.write(f"{loc_key}\n")
     def clear(self) -> None:
         self.processed.clear()
         if self.progress_path.exists(): self.progress_path.unlink()
+
 
 
 def _norm_code(x: object) -> str | None:
@@ -522,7 +589,7 @@ def generate_split(
     ranker_path: Optional[Path] = None,
     max_workers: int = 0,
 ) -> Tuple[int, int]:
-    total_samples = 0; total_pos = 0
+    total_samples, total_pos = writer.get_split_counts(split_name)
 
     # If indices are not provided, load them from path.
     # Keep loading independent to support --geo-only (expansion without global index).
@@ -565,6 +632,8 @@ def generate_split(
     grouped = df.groupby("loc_key")
     loc_keys = list(grouped.groups.keys())
 
+    tracker = ProgressTracker(log_base.with_suffix(".progress"))
+
     # Decide: parallel or sequential
     n_workers = max_workers if max_workers > 0 else int(os.environ.get("XGB_SAMPLE_WORKERS", "0"))
 
@@ -575,6 +644,9 @@ def generate_split(
         futures = {}
         with ProcessPoolExecutor(max_workers=n_workers) as executor:
             for loc_key in loc_keys:
+                progress_key = f"{split_name}|{loc_key}"
+                if tracker.is_processed(progress_key):
+                    continue
                 group = grouped.get_group(loc_key)
                 records = group.to_dict("records")
                 fut = executor.submit(
@@ -585,26 +657,31 @@ def generate_split(
                     split_name, persistent_cache, dense_store_dir,
                     siren_index_path,
                 )
-                futures[fut] = loc_key
+                futures[fut] = (loc_key, progress_key)
 
             pbar = tqdm(as_completed(futures), total=len(futures), desc=f"Generating {split_name} (parallel)")
             for fut in pbar:
+                loc_key, progress_key = futures[fut]
                 samples, lost_lines = fut.result()
                 for s in samples:
                     writer.add_sample(s)
                     total_samples += 1
                     total_pos += (1 if s["label"] == 1 else 0)
                 if lost_lines:
-                    with open(lost_gt_log, "a") as f:
+                    with open(lost_gt_log, "a", encoding="utf-8") as f:
                         if not header_written:
                             f.write("crm_id,crm_name,gt_siret,loss_reason,split,loc_key\n")
                             header_written = True
                         f.write("\n".join(lost_lines) + "\n")
+                tracker.mark_processed(progress_key)
     else:
         # Sequential (original path, with P0a cache + P0c timing)
         store = PartitionedCandidateStore(partitions_dir)
         pbar = tqdm(grouped, desc=f"Generating {split_name}")
         for loc_key, group in pbar:
+            progress_key = f"{split_name}|{loc_key}"
+            if tracker.is_processed(progress_key):
+                continue
             tfidf_cache: Dict = {}
             for row_dict in group.to_dict("records"):
                 crm_pre = preprocess_crm_row(row_dict); gt_siret = row_dict.get("ground_truth_siret")
@@ -617,7 +694,7 @@ def generate_split(
                 if not res.candidates: continue
                 set_global_name_idf_map(res.idf_map, res.default_idf)
                 if gt_siret and not res.gt_in_tfidf_pool:
-                    with open(lost_gt_log, "a") as f:
+                    with open(lost_gt_log, "a", encoding="utf-8") as f:
                         if not header_written: f.write("crm_id,crm_name,gt_siret,loss_reason,split,loc_key\n"); header_written = True
                         f.write(f'{row_dict.get("crm_id")},"{str(row_dict.get("crm_name")).replace(chr(34),chr(34)*2)}",{gt_siret},{res.loss_reason or "UNKNOWN"},{split_name},{loc_key}\n')
                 with timer.stage("generate_samples"):
@@ -637,6 +714,7 @@ def generate_split(
                 for s in samples:
                     s["split"] = split_name; writer.add_sample(s)
                     total_samples += 1; total_pos += (1 if s["label"] == 1 else 0)
+            tracker.mark_processed(progress_key)
             gc.collect()
 
         # P0c: Log timing summary
@@ -744,6 +822,14 @@ def main() -> None:
     written, sem_rate = writer.close()
     if semantic_expected and sem_rate < 0.20:
         raise RuntimeError(f"Semantic sanity check failed: {sem_rate:.2%}")
+    
+    progress_file = args.output.with_suffix(".progress")
+    if progress_file.exists():
+        try:
+            progress_file.unlink()
+            print(f"Cleared progress tracker file: {progress_file}")
+        except Exception as e:
+            print(f"[WARNING] Failed to clear progress tracker file: {e}")
     
     rc = RetrievalConfigV1(
         pool_mode="insee_then_postcode",

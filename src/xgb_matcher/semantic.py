@@ -119,6 +119,11 @@ def _get_encoder(model_name: str) -> Optional[Any]:
     if model_name in _ENCODERS:
         return _ENCODERS[model_name]
     try:
+        try:
+            import torch
+            torch.set_num_threads(1)
+        except Exception:
+            pass
         device = _device()
         if device:
             encoder = SentenceTransformer(model_name, device=device)
