@@ -137,6 +137,59 @@ _ACCENT_TRANSLATION_TABLE = str.maketrans({
 
 
 from functools import lru_cache
+import os
+
+FRENCH_ABBR_MAP = {
+    "CH": "CENTRE HOSPITALIER",
+    "CHU": "CENTRE HOSPITALIER UNIVERSITAIRE",
+    "CHR": "CENTRE HOSPITALIER REGIONAL",
+    "CHS": "CENTRE HOSPITALIER SPECIALISE",
+    "CMP": "CENTRE MEDICO PSYCHOLOGIQUE",
+    "SDIS": "SERVICE DEPARTEMENTAL D'INCENDIE ET DE SECOURS",
+    "CG": "CONSEIL GENERAL",
+    "CD": "CONSEIL DEPARTEMENTAL",
+    "CR": "CONSEIL REGIONAL",
+    "CAF": "CAISSE D'ALLOCATIONS FAMILIALES",
+    "CPAM": "CAISSE PRIMAIRE D'ASSURANCE MALADIE",
+    "IFSI": "INSTITUT DE FORMATION EN SOINS INFIRMIERS",
+    "EHPAD": "ETABLISSEMENT D'HEBERGEMENT POUR PERSONNES AGEES DEPENDANTES",
+    "EPHAD": "ETABLISSEMENT D'HEBERGEMENT POUR PERSONNES AGEES DEPENDANTES",
+    "DSI": "DIRECTION DES SYSTEMES D'INFORMATION",
+    "CTRE": "CENTRE",
+    "STE": "SAINTE",
+    "ST": "SAINT",
+    "HLM": "HABITATION A LOYER MODERE",
+    "CFA": "CENTRE DE FORMATION D'APPRENTIS",
+    "IME": "INSTITUT MEDICO EDUCATIF",
+    "ESAT": "ETABLISSEMENT ET SERVICE D'AIDE PAR LE TRAVAIL",
+    "MFR": "MAISON FAMILIALE RURALE",
+    "NMH": "NANTES METROPOLE HABITAT",
+    "HOPITAL": "CENTRE HOSPITALIER",
+}
+
+EXPAND_ABBREVIATIONS_ENABLED = os.getenv("XGB_EXPAND_ABBREVIATIONS", "1") == "1"
+
+def expand_abbreviations(text: str) -> str:
+    if not EXPAND_ABBREVIATIONS_ENABLED or not text:
+        return text
+    tokens = text.split()
+    expanded = []
+    for tok in tokens:
+        val = FRENCH_ABBR_MAP.get(tok)
+        if val:
+            expanded.append(val)
+        else:
+            m = re.match(r"^(CG|CD|CH|CHU|CAF|CPAM|SDIS)(\d+)$", tok)
+            if m:
+                abbr, num = m.groups()
+                val_abbr = FRENCH_ABBR_MAP.get(abbr)
+                if val_abbr:
+                    expanded.append(val_abbr + " " + num)
+                else:
+                    expanded.append(tok)
+            else:
+                expanded.append(tok)
+    return " ".join(expanded)
 
 @lru_cache(maxsize=128000)
 def normalize_text(text: str | None, uppercase: bool = True) -> str:
@@ -154,8 +207,11 @@ def normalize_text(text: str | None, uppercase: bool = True) -> str:
         
     t = t.replace("-", " ")
     t = t.translate(_ACCENT_TRANSLATION_TABLE)
+    
+    t = expand_abbreviations(t)
         
     return " ".join(t.split())
+
 
 
 def _strip_legal_terms(text: str) -> str:

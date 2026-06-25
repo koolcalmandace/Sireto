@@ -791,6 +791,40 @@ def build_semantic_name_pool(
     return [nm.text for nm in candidate_names]
 
 
+def _check_public_street_match(crm_name: str, cand: dict) -> bool:
+    if os.getenv("XGB_STREET_NAME_MATCHING", "1") != "1":
+        return False
+    # 1. Check if candidate is public / administrative / HLM / social housing
+    denom_ul = str(cand.get("denomination_ul") or "").upper()
+    denom_etab = str(cand.get("denomination") or "").upper()
+    enseigne = str(cand.get("enseigne1") or "").upper()
+    cj_ul = str(cand.get("cj_ul") or "")
+    
+    is_public = (
+        cj_ul.startswith(("4", "7")) or
+        any(k in denom_ul for k in ["HABITAT", "COMMUNE", "MAIRIE", "DEPARTEMENT", "OFFICE PUBLIC", "HOSPITALIER", "OPAC", "COPROPRIETE"]) or
+        any(k in denom_etab for k in ["HABITAT", "COMMUNE", "MAIRIE", "DEPARTEMENT", "OFFICE PUBLIC", "HOSPITALIER", "OPAC", "COPROPRIETE"]) or
+        any(k in enseigne for k in ["MAIRIE", "SUD", "NMH"])
+    )
+    if not is_public:
+        return False
+        
+    # 2. Check if the street libelle is in the crm_name
+    libelle = normalize_text(cand.get("libelleVoie"))
+    if not libelle:
+        return False
+    # Split libelle to get the core name (excluding common French street terms/prepositions)
+    lib_words = [w for w in libelle.split() if w not in {"DE", "LA", "LE", "DU", "DES", "L", "D"}]
+    if not lib_words:
+        return False
+    # Check if any core word of the street libelle is in the crm_name
+    crm_tokens = set(crm_name.split())
+    for w in lib_words:
+        if len(w) >= 3 and w in crm_tokens:
+            return True
+    return False
+
+
 def make_features_from_preprocessed(
     crm: Mapping[str, Any],
     cand: dict,
@@ -816,6 +850,17 @@ def make_features_from_preprocessed(
 
     # Bag of names for the candidate
     candidate_names: List[CandidateName] = build_candidate_names(cand)
+    if candidate_names and _check_public_street_match(crm_name, cand):
+        candidate_names = list(candidate_names)
+        candidate_names.append(
+            CandidateName(
+                text=crm_name,
+                source=NameSource.ETAB_ENSEIGNE,
+                is_ul_name=False,
+                is_sigle=False,
+            )
+        )
+
 
     # Street components
     crm_street_num = crm.get("crm_street_num")
