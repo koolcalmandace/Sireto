@@ -215,6 +215,36 @@ def _dense_retrieval_indices(
 
 
 # ---------------------------------------------------------------------------
+# EPCI Helpers (V4.0)
+# ---------------------------------------------------------------------------
+
+_EPCI_MAP: Dict[str, str] = {}
+def get_epci_map() -> Dict[str, str]:
+    global _EPCI_MAP
+    if not _EPCI_MAP:
+        import json
+        from pathlib import Path
+        epci_path = Path("C:/Users/Kabouassi/.gemini/antigravity/scratch/Sireto/data/insee_to_epci.json")
+        if epci_path.exists():
+            try:
+                with open(epci_path, "r", encoding="utf-8") as f:
+                    _EPCI_MAP = json.load(f)
+            except Exception:
+                _EPCI_MAP = {}
+    return _EPCI_MAP
+
+
+_EPCI_TO_INSEE: Dict[str, List[str]] = {}
+def get_epci_to_insee() -> Dict[str, List[str]]:
+    global _EPCI_TO_INSEE
+    if not _EPCI_TO_INSEE:
+        epci_map = get_epci_map()
+        for insee_code, epci_id in epci_map.items():
+            _EPCI_TO_INSEE.setdefault(epci_id, []).append(insee_code)
+    return _EPCI_TO_INSEE
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -396,6 +426,108 @@ def build_candidate_pool(
         pool = dedupe_candidates(filtered)
         pool_list = list(pool.values())
 
+        # Version 4.0 Cascade Gate: Strict Local Check + Bypass
+        from .naming import build_candidate_names, normalize_name
+        from .features import jaro_sim
+        
+        crm_name_norm = normalize_name(crm_name or "")
+        bypass_found = False
+        if pool_list and crm_name_norm:
+            for cand in pool_list:
+                cand_names = build_candidate_names(cand)
+                best_sim = 0.0
+                for nm in cand_names:
+                    sim = jaro_sim(crm_name_norm, nm.text)
+                    if sim > best_sim:
+                        best_sim = sim
+                if best_sim >= 0.90:
+                    bypass_found = True
+                    break
+
+        if not bypass_found and len(pool_list) < 100:
+            # Bypass failed and local pool is scarce -> Run Stream 1 (EPCI Fallback) and Stream 2 (Departmental Acronym)
+            epci_candidates = []
+            epci_map = get_epci_map()
+            if insee and insee in epci_map:
+                epci_id = epci_map[insee]
+                epci_to_insee = get_epci_to_insee()
+                neighbors = epci_to_insee.get(epci_id, [])
+                for nb in neighbors:
+                    if nb != insee:
+                        try:
+                            nb_candidates = store.load_by_insee(nb)
+                            nb_filtered = _apply_filters(nb_candidates, config.drop_unnamed, config.include_closed)
+                            epci_candidates.extend(nb_filtered)
+                        except Exception:
+                            pass
+
+            acronym_candidates = []
+            dept_prefix = postcode[:2] if postcode else None
+            if dept_prefix:
+                acro = None
+                if crm_name:
+                    import re
+                    clean_name = re.sub(r"[^\w\s]", " ", crm_name)
+                    words = clean_name.split()
+                    EXCLUDED_ACRONYMS = {
+                        "SA", "SAS", "SARL", "SCI", "EURL", "SNC", "SELARL", "SCP", "ASS", "ASSOC", "ASSOCIATION", 
+                        "ETS", "STE", "SOCIETE", "GROUP", "GROUPE", "COOP", "GIE", "GAEC", "EARL"
+                    }
+                    for w in words:
+                        if len(w) >= 2 and len(w) <= 6 and w.isupper() and w.isalpha():
+                            if w not in EXCLUDED_ACRONYMS:
+                                acro = w
+                                break
+                if acro:
+                    try:
+                        import pyarrow.dataset as ds
+                        from pathlib import Path
+                        # Only query partitions within target department to avoid scanning the entire country
+                        cp_dir = Path("C:/Users/Kabouassi/.gemini/antigravity/scratch/Sireto/data/candidates_v7_all/cp")
+                        dept_postcodes = []
+                        if cp_dir.exists():
+                            for p_dir in cp_dir.iterdir():
+                                if p_dir.is_dir() and p_dir.name.startswith("postcode="):
+                                    pc_val = p_dir.name.split("=", 1)[1]
+                                    if pc_val.startswith(dept_prefix):
+                                        dept_postcodes.append(pc_val)
+                        
+                        if dept_postcodes:
+                            filt = (ds.field("sigle_ul") == acro) & (ds.field("postcode").isin(dept_postcodes))
+                        else:
+                            filt = (ds.field("sigle_ul") == acro)
+                            
+                        table = store._dataset_cp.to_table(
+                            filter=filt,
+                            columns=store._columns_cp
+                        )
+                        acro_rows = store._coerce_candidate_types(table.to_pylist())
+                        for r in acro_rows:
+                            cp = r.get("postcode")
+                            if cp and str(cp).startswith(dept_prefix):
+                                if config.drop_unnamed and not any([
+                                    r.get("denomination"),
+                                    r.get("denomination_usuelle_ul"),
+                                    r.get("enseigne1"),
+                                    r.get("enseigne2"),
+                                    r.get("enseigne3"),
+                                    r.get("denomination_ul"),
+                                    r.get("sigle_ul"),
+                                    r.get("nom_ul"),
+                                    r.get("prenom_usuel_ul"),
+                                ]):
+                                    continue
+                                if not config.include_closed and r.get("etat_admin") == "F":
+                                    continue
+                                acronym_candidates.append(r)
+                    except Exception:
+                        pass
+
+            if epci_candidates or acronym_candidates:
+                filtered = filtered + epci_candidates + acronym_candidates
+                pool = dedupe_candidates(filtered)
+                pool_list = list(pool.values())
+
         result.pool_sizes["filtered"] = len(pool_list)
         result.gt_in_filtered_pool = gt_norm in _get_siret_set(pool_list) if gt_norm else False
 
@@ -449,13 +581,16 @@ def build_candidate_pool(
                     "filtered": result.pool_sizes.get("filtered", 0),
                 }
             }
-            # Limit cache size to 3 (due to geometric sorting, keeping a huge cache is unnecessary and causes thrashed memory swap)
-            if len(partition_cache) > 3:
-                if hasattr(partition_cache, "popitem"):
+            # Limit cache size to 128 to prevent memory exhaustion (MemoryError) while maintaining sub-second query speed
+            if len(partition_cache) > 128:
+                try:
                     partition_cache.popitem(last=False)
-                else:
-                    first_key = next(iter(partition_cache))
-                    partition_cache.pop(first_key)
+                except TypeError:
+                    try:
+                        partition_cache.popitem()
+                    except Exception:
+                        first_key = next(iter(partition_cache))
+                        partition_cache.pop(first_key, None)
 
     # Step 3: Universal rescue whitelist (addr_hash + numeric tokens) - query specific
     whitelisted_sirets: set[str] = set()
@@ -590,7 +725,21 @@ def build_candidate_pool(
 
         for siren in seed_sirens:
             locs = siren_to_geo.get_locations(siren)
-            sorted_locs = sorted(locs, key=lambda loc: (loc[0] != crm_insee, loc[1] != crm_cp))
+            
+            epci_map = get_epci_map()
+            crm_epci = epci_map.get(crm_insee) if crm_insee else None
+            
+            def geo_proximity_key(loc):
+                loc_insee, loc_cp = loc
+                if loc_insee == crm_insee:
+                    return 0  # Commune
+                if crm_epci and epci_map.get(loc_insee) == crm_epci:
+                    return 1  # EPCI
+                if loc_cp and crm_cp and str(loc_cp)[:2] == str(crm_cp)[:2]:
+                    return 2  # Department
+                return 3  # National (others)
+                
+            sorted_locs = sorted(locs, key=geo_proximity_key)
             added_siren = 0
 
             for insee_code, _ in sorted_locs:

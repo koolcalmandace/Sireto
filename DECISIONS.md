@@ -311,3 +311,19 @@ Consequences:
 - Nomenclature projet explicite:
   - `V8 base` = Route B full SIREN-first,
   - `V8b` = V7 + SIREN expansion (chemin courant).
+
+## 2026-07-30 - Version 4.0 Release: Alignment on High-Quality 250 Confirmed Training Subset and Scarcity Gate
+
+Decision:
+- Re-train the Fast Ranker and Decider models on a verified 250 confirmed sample set of highest quality to eliminate training data noise.
+- Implement the "Scarcity Gate" (`len(pool_list) < 100`) inside `retrieval.py` to disable Streams 1 and 2 fallbacks in mega-communes (like Nantes/Paris), resolving the memory leak and preventing RAM crashes.
+- Modify `infer_xgb_two_stage_v40.py` to write each prediction step synchronously to disk instead of batch buffering, ensuring 100% resume safety on interrupt.
+
+Rationale:
+- Training on a large but noisy subset (17K) compromised the decider model calibration and led to excessive false positives.
+- Unrestricted fallback search in large cities was redundant and consumed excessive RAM, causing MemoryErrors.
+- Sync disk writing prevents progress loss when matching runs are interrupted.
+
+Consequences:
+- Created the meta, fast-ranker, and decider files under timestamp `20260730_155642`.
+- Reduced V4.0 false positive errors by 3.2x compared to V3.5 (dropping from 211 down to 65 errors).

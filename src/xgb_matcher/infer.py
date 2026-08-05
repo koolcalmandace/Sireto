@@ -416,10 +416,10 @@ class XgbInferenceEngine:
             make_features_from_preprocessed(crm_pre, c, skip_semantic=True)
             for _, c in cand_list
         ]
-        ranker_feature_order = self.ranker_feature_order or self.feature_order
+        ranker_feature_order = getattr(self.ranker, "feature_names", None) or self.ranker_feature_order or self.feature_order
         X1 = pd.DataFrame(feats_stage1)[ranker_feature_order]
         scores_stage1 = self.ranker.predict(
-            xgb.DMatrix(X1.values, feature_names=ranker_feature_order)
+            xgb.DMatrix(X1)
         )
         
         # Top-N selection
@@ -465,10 +465,11 @@ class XgbInferenceEngine:
                 feat["name_semantic_gap"] = 0.0
         
         # Stage 2 scoring
-        X_n = pd.DataFrame(feats_n)[self.feature_order]
-        probs = self.decider.predict_proba(X_n.values)[:, 1]
+        feature_order = self.feature_order or getattr(self.decider, "feature_names_in_", None) or FEATURE_NAMES
+        X_n = pd.DataFrame(feats_n)[feature_order]
+        probs = self.decider.predict_proba(X_n)[:, 1]
         if self.calibrator is not None:
-            probs = self.calibrator.predict_proba(X_n.values)[:, 1]
+            probs = self.calibrator.predict_proba(X_n)[:, 1]
         
         scores = np.array(probs)
         pool_size_stage1 = len(cand_list)
@@ -499,11 +500,7 @@ class XgbInferenceEngine:
             routing_confidence = None
             routing_status = None
             if rank == 1:
-                if self.risk_model is None:
-                    print(f"[DEBUG] risk_model is None")
-                elif not self.risk_features:
-                    print(f"[DEBUG] risk_features is empty")
-                else:
+                if self.risk_model is not None and self.risk_features:
                     risk_dict = feat_row.copy()
                     risk_dict["score_top1"] = top1_score
                     risk_dict["score_top2"] = top2_score
@@ -661,10 +658,10 @@ class XgbInferenceEngine:
                     for _, c in cand_list
                 ]
                 
-                ranker_feature_order = self.ranker_feature_order or self.feature_order
+                ranker_feature_order = getattr(self.ranker, "feature_names", None) or self.ranker_feature_order or self.feature_order
                 X1 = pd.DataFrame(feats_stage1)[ranker_feature_order]
                 scores_stage1 = self.ranker.predict(
-                    xgb.DMatrix(X1.values, feature_names=ranker_feature_order)
+                    xgb.DMatrix(X1)
                 )
                 
                 stage1_top_n = min(self.stage1_top_n, len(scores_stage1))
@@ -776,10 +773,10 @@ class XgbInferenceEngine:
             make_features_from_preprocessed(crm_pre, c, skip_semantic=True)
             for _, c in cand_list
         ]
-        ranker_feature_order = self.ranker_feature_order or self.feature_order
+        ranker_feature_order = getattr(self.ranker, "feature_names", None) or self.ranker_feature_order or self.feature_order
         X1 = pd.DataFrame(feats_stage1)[ranker_feature_order]
         scores_stage1 = self.ranker.predict(
-            xgb.DMatrix(X1.values, feature_names=ranker_feature_order)
+            xgb.DMatrix(X1)
         )
         
         # Top-N selection (use instance config)
@@ -825,10 +822,11 @@ class XgbInferenceEngine:
                 feat["name_semantic_gap"] = 0.0
         
         # Stage 2 scoring
-        X_n = pd.DataFrame(feats_n)[self.feature_order]
-        probs = self.decider.predict_proba(X_n.values)[:, 1]
+        feature_order = self.feature_order or getattr(self.decider, "feature_names_in_", None) or FEATURE_NAMES
+        X_n = pd.DataFrame(feats_n)[feature_order]
+        probs = self.decider.predict_proba(X_n)[:, 1]
         if self.calibrator is not None:
-            probs = self.calibrator.predict_proba(X_n.values)[:, 1]
+            probs = self.calibrator.predict_proba(X_n)[:, 1]
         
         scores = np.array(probs)
         sorted_idx = np.argsort(scores)[::-1]
@@ -1027,7 +1025,7 @@ class XgbInferenceEngine:
             crm_row=crm_row,
             crm_pre=crm_pre,
             config=config,
-            tfidf_cache={},
+            tfidf_cache=getattr(self, "_tfidf_cache", {}),
             gt_siret=None,
             siren_to_geo=self.siren_to_geo,
             partition_cache=getattr(self, "_partition_cache", None),
@@ -1152,6 +1150,8 @@ class TopKRow:
             "candidate_last_treatment_date": self.candidate_last_treatment_date,
             "routing_confidence": self.routing_confidence,
             "routing_status": self.routing_status,
+            "xgb_status": self.routing_status,
+            "chosen_siret_xgb": self.siret_candidate,
             "rank": self.rank,
             "has_name_evidence": self.has_name_evidence,
             "name_jaro_max": self.name_jaro_max,

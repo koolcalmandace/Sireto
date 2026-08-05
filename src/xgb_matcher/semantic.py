@@ -121,7 +121,8 @@ def _get_encoder(model_name: str) -> Optional[Any]:
     try:
         try:
             import torch
-            torch.set_num_threads(1)
+            num_t = int(os.getenv("XGB_SEMANTIC_THREADS", "4"))
+            torch.set_num_threads(num_t)
         except Exception:
             pass
         device = _device()
@@ -211,13 +212,20 @@ def batch_encode_texts(texts: List[str]) -> Dict[str, np.ndarray]:
         else:
             encoder = _get_encoder(_model_name())
             if encoder is not None:
-                embeddings = encoder.encode(
-                    texts_to_encode,
-                    batch_size=_batch_size(),
-                    show_progress_bar=False,
-                    convert_to_numpy=True,
-                    normalize_embeddings=True,  # Already normalized
-                )
+                sub_batch_size = 1000
+                all_emb_list = []
+                for sub_i in range(0, len(texts_to_encode), sub_batch_size):
+                    sub_texts = texts_to_encode[sub_i : sub_i + sub_batch_size]
+                    sub_emb = encoder.encode(
+                        sub_texts,
+                        batch_size=_batch_size(),
+                        show_progress_bar=False,
+                        convert_to_numpy=True,
+                        normalize_embeddings=True,
+                    )
+                    all_emb_list.append(sub_emb)
+                if all_emb_list:
+                    embeddings = np.vstack(all_emb_list)
         if embeddings is not None:
             for text, emb in zip(texts_to_encode, embeddings):
                 _EMBEDDING_CACHE[text] = emb.astype(np.float32, copy=False)

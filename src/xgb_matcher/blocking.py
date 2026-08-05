@@ -250,12 +250,13 @@ def build_tfidf_index(
         names = [normalize_text_for_tfidf(candidate_tfidf_text(c) or "") for c in candidates]
     
     # Align TF-IDF settings with training (generate_training_samples_v5fast.py)
+    min_df_val = 2 if len(candidates) > 20000 else 1
     vectorizer = TfidfVectorizer(  # type: ignore[arg-type]
         analyzer="word",
         ngram_range=(1, 2),
         lowercase=False,
         token_pattern=r"(?u)\b\w+\b",
-        min_df=1,
+        min_df=min_df_val,
         norm=None,  # type: ignore[arg-type]
     )
     try:
@@ -276,12 +277,13 @@ def build_address_tfidf_index(
     if not any(addresses):
         return None, None
 
+    min_df_val = 2 if len(candidates) > 20000 else 1
     vectorizer = TfidfVectorizer(  # type: ignore[arg-type]
         analyzer="word",
         ngram_range=(1, 2), # Capture street names properly
         lowercase=False,
         token_pattern=r"(?u)\b\w+\b",
-        min_df=1,
+        min_df=min_df_val,
         max_df=0.95,
         norm=None,  # type: ignore[arg-type]  # No length penalty for long addresses
     )
@@ -350,6 +352,16 @@ def prefilter_candidates_tfidf(
         
     q = vectorizer.transform([crm_norm])
     sims = q @ cand_matrix.T
+    
+    # Try expanded query too (Dual Query representation)
+    from .naming import expand_abbreviations
+    crm_norm_exp = expand_abbreviations(crm_norm)
+    if crm_norm_exp != crm_norm:
+        q_exp = vectorizer.transform([crm_norm_exp])
+        sims_exp = q_exp @ cand_matrix.T
+        # Element-wise maximum of sparse matrices
+        sims = sims.maximum(sims_exp)
+        
     row = sims.getrow(0)
     
     # Collect word-based matches
@@ -415,13 +427,14 @@ def build_char_tfidf_index(
     cand_names: List[str],
 ) -> Tuple[Optional[TfidfVectorizer], Optional[Any]]:
     """Build char-ngram TF-IDF index for acronym/typo matching."""
-    if not cand_names:
+    if not cand_names or len(cand_names) > 20000:
         return None, None
+    min_df_val = 3
     char_vec = TfidfVectorizer(
         analyzer="char_wb",
         ngram_range=(3, 5),
         lowercase=False,
-        min_df=1,
+        min_df=min_df_val,
     )
     try:
         char_mat = char_vec.fit_transform(cand_names)

@@ -98,6 +98,18 @@ def _load_samples_meta(samples_path: Path) -> Dict:
 def prepare_data(df: pd.DataFrame, feature_names: List[str]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     df_sorted = df.sort_values("query_id").reset_index(drop=True)
     X = df_sorted[feature_names].values.astype(np.float32)
+    
+    # Zero out skewed features to enforce reliance on name and address metrics only
+    SKEWED_FEATURES = [
+        "legal_form_category", "is_siege", "name_length_max", 
+        "type_of_max_name", "name_city_overlap_max", 
+        "is_association", "is_crm_school", "ul_vs_pm_indicator"
+    ]
+    for f in SKEWED_FEATURES:
+        if f in feature_names:
+            idx = feature_names.index(f)
+            X[:, idx] = 0.0
+            
     y = df_sorted["label"].values.astype(np.float32)
     groups = df_sorted.groupby("query_id", sort=False).size().values
     return X, y, groups
@@ -109,6 +121,18 @@ def prepare_data_with_df(
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, pd.DataFrame]:
     df_sorted = df.sort_values("query_id").reset_index(drop=True)
     X = df_sorted[feature_names].values.astype(np.float32)
+    
+    # Zero out skewed features to enforce reliance on name and address metrics only
+    SKEWED_FEATURES = [
+        "legal_form_category", "is_siege", "name_length_max", 
+        "type_of_max_name", "name_city_overlap_max", 
+        "is_association", "is_crm_school", "ul_vs_pm_indicator"
+    ]
+    for f in SKEWED_FEATURES:
+        if f in feature_names:
+            idx = feature_names.index(f)
+            X[:, idx] = 0.0
+            
     y = df_sorted["label"].values.astype(np.float32)
     groups = df_sorted.groupby("query_id", sort=False).size().values
     return X, y, groups, df_sorted
@@ -428,8 +452,8 @@ def main() -> None:
             "feature_names": FEATURE_NAMES,
             "feature_order": FEATURE_NAMES,
             "decider_params": CLASSIFIER_PARAMS,
-            "decider_model": str(decider_path),
-            "decider_calibrator": str(calibrator_path) if calibrator_path else None,
+            "decider_model": str(decider_path.name),
+            "decider_calibrator": str(calibrator_path.name) if calibrator_path else None,
             "decider_calibration_method": args.calibration,
             "decider_top_k_filter": args.top_k if ranker is not None else 0,
             "decider_metrics": metrics,

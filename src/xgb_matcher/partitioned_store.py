@@ -19,7 +19,7 @@ import pyarrow.parquet as pq
 from .blocking import normalize_code, department_from_code
 
 # Maximum number of entries per store cache (INSEE / CP / dept)
-_MAX_STORE_CACHE_SIZE = 100
+_MAX_STORE_CACHE_SIZE = 10
 
 # Columns actually used by features, naming, filtering, and output.
 # Excludes unused columns (nom_usage_ul, pseudonyme_ul) to reduce I/O and RAM.
@@ -29,7 +29,7 @@ REQUIRED_COLUMNS = [
     "etablissementSiege", "is_siege",
     "numeroVoie", "typeVoie", "libelleVoie", "complementAdresse",
     "postcode", "city", "insee",
-    "cj_ul", "etat_admin", "last_treatment_date",
+    "cj_ul", "etat_admin",
     "sigle_ul", "denomination_ul", "denomination_usuelle_ul",
     "nom_ul", "prenom_usuel_ul",
     "pm_dirigeant_names",

@@ -68,6 +68,18 @@ def prepare_data(df: pd.DataFrame, feature_names: List[str]) -> Tuple[np.ndarray
     """Prepare X, y, and groups for XGBoost ranking."""
     df = df.sort_values("query_id")
     X = df[feature_names].values.astype(np.float32)
+    
+    # Zero out skewed features to enforce reliance on name and address metrics only
+    SKEWED_FEATURES = [
+        "legal_form_category", "is_siege", "name_length_max", 
+        "type_of_max_name", "name_city_overlap_max", 
+        "is_association", "is_crm_school", "ul_vs_pm_indicator"
+    ]
+    for f in SKEWED_FEATURES:
+        if f in feature_names:
+            idx = feature_names.index(f)
+            X[:, idx] = 0.0
+            
     y = df["label"].values.astype(np.int32)
     groups = df.groupby("query_id").size().values
     return X, y, groups
