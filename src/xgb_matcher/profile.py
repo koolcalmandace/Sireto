@@ -284,8 +284,16 @@ class InferenceProfile:
         model_dir: Path | str = Path("models"),
         strict: bool = True,
     ) -> "InferenceProfile":
-        """Load profile from the latest xgb_two_stage_meta_*.json in model_dir."""
+        """Load profile from the active/latest xgb_two_stage_meta_*.json in model_dir."""
         model_dir = Path(model_dir)
+        active_txt = model_dir / "ACTIVE_VERSION.txt"
+        if active_txt.exists():
+            active_ts = active_txt.read_text(encoding="utf-8").strip()
+            if active_ts:
+                target_meta = model_dir / f"xgb_two_stage_meta_{active_ts}.json"
+                if target_meta.exists():
+                    return cls.from_meta(target_meta, strict=strict)
+
         metas = sorted(model_dir.glob("xgb_two_stage_meta_*.json"), reverse=True)
         if not metas:
             raise FileNotFoundError(f"No xgb_two_stage_meta_*.json found in {model_dir}")

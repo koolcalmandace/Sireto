@@ -145,6 +145,30 @@ def set_semantic_client(client) -> None:
     _SEMANTIC_CLIENT = client
 
 
+def precompute_embeddings(texts: Iterable[str]) -> Dict[str, np.ndarray]:
+    """Pre-compute and return normalized embeddings for a list of texts in main process."""
+    if not _semantic_enabled() or SentenceTransformer is None:
+        return {}
+    
+    unique_texts = list(set(str(t).strip() for t in texts if t and str(t).strip()))
+    if not unique_texts:
+        return {}
+    
+    encoder = _get_encoder(_model_name())
+    if encoder is None:
+        return {}
+    
+    batch_size = _batch_size()
+    encoded = encoder.encode(unique_texts, batch_size=batch_size, show_progress_bar=False, normalize_embeddings=True)
+    
+    cache = {}
+    for text, vec in zip(unique_texts, encoded):
+        vec32 = np.asarray(vec, dtype=np.float32)
+        _EMBEDDING_CACHE[text] = vec32
+        cache[text] = vec32
+    return cache
+
+
 def _normalize(vec: np.ndarray) -> np.ndarray:
     norm = float(np.linalg.norm(vec))
     if norm == 0.0:

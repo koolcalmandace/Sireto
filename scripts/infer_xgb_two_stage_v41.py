@@ -90,6 +90,14 @@ def init_worker(profile_dict: dict):
     except ImportError:
         pass
         
+    precomputed_cache = profile_dict.get("precomputed_cache")
+    if precomputed_cache:
+        try:
+            from src.xgb_matcher.semantic import _EMBEDDING_CACHE
+            _EMBEDDING_CACHE.update(precomputed_cache)
+        except Exception:
+            pass
+
     _engine = Version41XgbInferenceEngine.from_profile(profile)
 
 def process_single_row(args: tuple) -> tuple:
@@ -175,10 +183,10 @@ class Version41XgbInferenceEngine(XgbInferenceEngine):
         self.disable_scraper = True  # Pure Offline Mode
         self.auto_threshold = 0.85  # Calibrated AUTO threshold
         
-        # Hard-lock Stage 1 Top N candidates to 20 (SSOT strategy)
+        # Lock Stage 1 Top N candidates to 50 (V4.3 strategy for 100% ranker recall)
         if hasattr(self, "retrieval_config") and self.retrieval_config is not None:
             try:
-                self.retrieval_config = replace(self.retrieval_config, stage1_top_n=20)
+                self.retrieval_config = replace(self.retrieval_config, stage1_top_n=50)
             except Exception:
                 pass
 
@@ -413,6 +421,17 @@ def main():
             "decider_path": str(profile.decider_path),
         }
         
+        if os.getenv("XGB_SEMANTIC_ENABLED", "0") == "1":
+            try:
+                from src.xgb_matcher.semantic import precompute_embeddings
+                crm_names = [str(r.get("crm_name") or r.get("Client final") or r.get("name") or "").strip() for _, r in rows_to_process]
+                logging.info(f"Pre-computing semantic embeddings for {len(set(crm_names))} unique query names in main process...")
+                precomputed_cache = precompute_embeddings(crm_names)
+                profile_dict["precomputed_cache"] = precomputed_cache
+                logging.info(f"Pre-computed {len(precomputed_cache)} embeddings successfully!")
+            except Exception as e:
+                logging.warning(f"Pre-computing semantic embeddings skipped: {e}")
+
         # Concurrency Worker Cap (safely default to 2 workers to control RAM footprint; configurable via environment variable)
         num_workers = int(os.environ.get("XGB_INFER_WORKERS", "2"))
         logging.info(f"Spawning {num_workers} concurrent workers for parallel batch matching...")
