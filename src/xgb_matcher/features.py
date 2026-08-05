@@ -1,6 +1,25 @@
 """
 Shared feature engineering functions for XGBoost SIRET matcher.
+"""
 
+from __future__ import annotations
+
+
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
+try:
+    import torch
+    torch.set_num_threads(1)
+except ImportError:
+    pass
+
+
+"""
 This module is used by both training and inference scripts to ensure
 consistency (no train/serve skew).
 
@@ -25,7 +44,6 @@ Features computed:
   - legal_form_category: Encoded legal form category (PUBLIC/PRIVE/INCONNU)
 """
 
-from __future__ import annotations
 
 import os
 import re
@@ -181,6 +199,8 @@ FEATURE_NAMES: List[str] = [
     "full_addr_match_score",       # weighted address completeness: 0.5*street_name_jaro + 0.3*street_number_match + 0.2*postcode_match
     "name_jaro_vs_enseigne",       # Jaro between CRM name and establishment-level name (enseigne), not UL name
     "name_city_suffix_match",      # ratio of CRM city tokens appearing in candidate enseigne
+    "name_jaccard",                # Word set Jaccard similarity for name tokens
+    "address_jaccard",             # Word set Jaccard similarity for address tokens
 ]
 
 SEMANTIC_FEATURE_NAMES: List[str] = [
@@ -542,7 +562,7 @@ def token_overlap(
     """
     Compute ratio of common tokens between two strings.
 
-    Returns |A ∩ B| / |A ∪ B| (Jaccard similarity on tokens).
+    Returns |A intersect B| / |A union B| (Jaccard similarity on tokens).
     """
     fs_stopwords = frozenset(stopwords) if stopwords is not None else None
     return _token_overlap_cached(a, b, fs_stopwords, min_len)
@@ -640,7 +660,7 @@ def acronym_match(a: str, b: str) -> int:
     """
     Check if one string is the acronym of the other.
 
-    Handles cases like "SNCF" ↔ "SOCIETE NATIONALE DES CHEMINS DE FER".
+    Handles cases like "SNCF" matches "SOCIETE NATIONALE DES CHEMINS DE FER".
     """
     if not a or not b:
         return 0
@@ -1178,6 +1198,10 @@ def make_features_from_preprocessed(
     else:
         city_in_enseigne = 0.0
     features["name_city_suffix_match"] = city_in_enseigne
+
+    # Version 4.0: Jaccard token overlap features
+    features["name_jaccard"] = token_overlap(crm_name, best_cand_name_text, stopwords=None, min_len=1) if best_cand_name_text else 0.0
+    features["address_jaccard"] = token_overlap(crm_addr, cand_addr, stopwords=None, min_len=1)
 
     return features
 
