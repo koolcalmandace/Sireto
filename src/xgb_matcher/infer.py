@@ -1016,6 +1016,47 @@ class XgbInferenceEngine:
                 include_closed=not exclude_closed,
             )
 
+        crm_insee = str(crm_row.get("insee") or crm_row.get("crm_insee") or "").strip()
+        crm_postcode = str(crm_row.get("postcode") or crm_row.get("crm_cp") or "").strip()
+
+        # --- Geo Resolution Branch (Chantier 1) ---
+        # When crm_insee is absent, use strict CP-based child INSEE discovery
+        # instead of loading the entire CP bucket blindly.
+        if not crm_insee and crm_postcode:
+            _logger = logging.getLogger(__name__)
+            _logger.debug(
+                "GEO_RESOLUTION: crm_id=%s has no INSEE — using load_with_geo_resolution (cp=%s)",
+                crm_id, crm_postcode,
+            )
+            candidates_raw = self.store.load_with_geo_resolution(
+                insee=crm_row.get("insee") or crm_row.get("crm_insee"),
+                postcode=crm_row.get("postcode") or crm_row.get("crm_cp"),
+                crm_id=crm_id,
+                mega_insee_max_rows=config.mega_insee_max_rows,
+                mega_insee_policy=config.mega_insee_policy,
+                logger=_logger,
+            )
+            if candidates_raw:
+                # Apply filters inline and deduplicate (mirrors build_candidate_pool logic)
+                from .blocking import dedupe_candidates
+                from .candidates import compute_name_idf_map
+                filtered = [
+                    c for c in candidates_raw
+                    if (config.include_closed or str(c.get("etat_admin", "")).strip().upper() != "F")
+                    and (not config.drop_unnamed or any([
+                        c.get("denomination"), c.get("denomination_usuelle_ul"),
+                        c.get("enseigne1"), c.get("denomination_ul"),
+                        c.get("nom_ul"), c.get("prenom_usuel_ul"),
+                    ]))
+                ]
+                pool = list(dedupe_candidates(filtered).values())
+                idf_map, default_idf = compute_name_idf_map(
+                    {str(c.get("siret") or ""): c for c in pool if c.get("siret")}
+                )
+                return pool, idf_map, float(default_idf)
+            else:
+                return [], {}, 0.0
+
         result = build_candidate_pool(
             store=self.store,
             crm_row=crm_row,

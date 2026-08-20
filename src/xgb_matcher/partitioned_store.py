@@ -209,3 +209,115 @@ class PartitionedCandidateStore:
 
     def load_by_department(self, insee: Optional[str], postcode: Optional[str]) -> List[dict]:
         raise RuntimeError("Department fallback is disabled under SSOT.")
+
+    # ---------------------------------------------------------------------------
+    # Strict Geo Resolution (Chantier 1 — feature/geo-resolution-and-crm-expansion)
+    # ---------------------------------------------------------------------------
+
+    def _discover_insee_codes_from_cp(self, postcode: Optional[str]) -> List[str]:
+        """Return all unique INSEE codes that share the given postcode in the CP partition.
+
+        This is used when crm_insee is missing/empty: we load the CP partition to
+        discover which INSEE communes share that postcode, then load each one via
+        the INSEE partition (more precise and avoids loading the whole CP bucket).
+        """
+        code_cp = normalize_code(postcode)
+        if not code_cp:
+            return []
+        try:
+            table = self._dataset_cp.to_table(
+                filter=ds.field("postcode") == code_cp,
+                columns=["insee"] if "insee" in (self._columns_cp or []) else self._columns_cp,
+            )
+        except Exception:
+            return []
+        rows = table.to_pylist()
+        seen: dict = {}
+        for r in rows:
+            code = normalize_code(r.get("insee"))
+            if code:
+                seen[code] = None
+        return list(seen.keys())
+
+    def load_with_geo_resolution(
+        self,
+        insee: Optional[str],
+        postcode: Optional[str],
+        crm_id: str = "<unknown>",
+        *,
+        mega_insee_max_rows: int = 100_000,
+        mega_insee_policy: str = "cp_filter_insee",
+        logger: Optional[object] = None,
+    ) -> List[dict]:
+        """Load candidates using the strict geographic resolution hierarchy.
+
+        Hierarchy:
+          1. crm_insee present  -> load_by_insee() directly (authoritative)
+          2. crm_insee absent   -> discover child INSEE codes from the CP partition,
+                                   then load_by_insee() for each discovered INSEE code
+          3. No results at all  -> log GEO_RESOLUTION_EMPTY and return []
+
+        This method never loads the entire CP partition blindly.
+        It never performs a department-level fallback.
+
+        Args:
+            insee:               INSEE commune code from CRM (may be None/empty).
+            postcode:            Postal code from CRM (may be None/empty).
+            crm_id:              CRM entry identifier for logging.
+            mega_insee_max_rows: Threshold above which mega-commune policy applies.
+            mega_insee_policy:   Policy for mega-communes ("cp_filter_insee" / "full_insee").
+            logger:              Optional logger instance (uses module logger if None).
+        """
+        import logging as _logging
+        _log = logger if logger is not None else _logging.getLogger(__name__)
+
+        code_insee = normalize_code(insee)
+        code_cp = normalize_code(postcode)
+
+        # --- Step 1: INSEE is present (primary path) ---
+        if code_insee:
+            rows = self.load_by_insee_then_postcode(
+                code_insee,
+                code_cp,
+                mega_insee_max_rows=mega_insee_max_rows,
+                mega_insee_policy=mega_insee_policy,
+            )
+            if rows:
+                return rows
+            # INSEE provided but partition empty — log and continue to CP fallback
+            _log.warning(
+                "GEO_RESOLUTION: INSEE %s returned empty partition for crm_id=%s; "
+                "attempting CP-based child INSEE discovery (postcode=%s).",
+                code_insee, crm_id, code_cp,
+            )
+
+        # --- Step 2: INSEE absent or empty — discover child INSEEs from CP ---
+        if code_cp:
+            child_insees = self._discover_insee_codes_from_cp(code_cp)
+            if child_insees:
+                _log.debug(
+                    "GEO_RESOLUTION: CP %s resolved to %d child INSEE(s) for crm_id=%s: %s",
+                    code_cp, len(child_insees), crm_id, child_insees[:10],
+                )
+                combined: dict = {}
+                for child_insee in child_insees:
+                    partial = self.load_by_insee(child_insee)
+                    for r in partial:
+                        siret = str(r.get("siret") or "")
+                        if siret and siret not in combined:
+                            combined[siret] = r
+                if combined:
+                    return list(combined.values())
+            else:
+                _log.warning(
+                    "GEO_RESOLUTION: CP %s found no child INSEE codes for crm_id=%s.",
+                    code_cp, crm_id,
+                )
+
+        # --- Step 3: No results — log cleanly and return empty ---
+        _log.warning(
+            "GEO_RESOLUTION_EMPTY: No candidates found for crm_id=%s "
+            "(insee=%s, postcode=%s). Returning empty pool.",
+            crm_id, insee, postcode,
+        )
+        return []
