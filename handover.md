@@ -1,4 +1,4 @@
-# SIRETO Handover - 1 Mars 2026
+# SIRETO Handover - 20 Aout 2026
 
 ## Etat des lieux
 Le pipeline cible n'est plus "Route B full SIREN-first" comme chemin principal.
@@ -9,7 +9,14 @@ La trajectoire retenue est desormais **V8b = V7 + SIREN expansion post-prefilter
 
 Route B (ranking SIREN global en phase 1) reste dans le code pour A/B tests, mais n'est plus la strategie par defaut.
 
+**Branche active** : `feature/geo-resolution-and-crm-expansion` (depuis `main`)
+
 ## Actions terminees (fenetre recente)
+- **Chantier 1 : Resolution Geo Propre** : ajout `load_with_geo_resolution()` + `_discover_insee_codes_from_cp()` dans `partitioned_store.py` ; branchement dans `_build_candidate_pool()` de `infer.py`. Hierarchie stricte : INSEE -> CP child discovery -> LOG_EMPTY. *(commit GitHub: `c754b97`)*
+- **Chantier 2a : Audit qualite increment CRM 20260817** : 15 516 cas UNSEEN valides, 0 ambigu, 0% chevauchement SIREN, verdict SATISFAISANT. *(commit GitHub: `c754b97`)*
+- **Chantier 2b : Script de fusion controlee** : `scripts/merge_crm_increment.py` produit `data/crm_ok_gt_merged_v1.csv` (32 570 lignes, 0 doublon). *(commit GitHub: `c754b97`)*
+- **Chantier 2c : Script .bat de reentrainement** : `scripts/merge_and_retrain.bat` (6 etapes : merge + siren_to_geo + gen ranker + gen decider + train S1 + train S2 + instructions S3). *(commit GitHub: `c754b97`)*
+- **Documentation** : `rules.md`, `docs/weights_and_baseline_metrics_v0.md`, `docs/architecture_v0.md`, `docs/analysis/audit_crm_increment_20260817.md`. *(commit GitHub: `c754b97`)*
 - **V8 features + hard negatives + hyperparams decider**: ajout de 7 features d'interaction, extension des hard negatives colocataires/homonymes/siblings, tuning decider (`lr=0.05`, `max_depth=7`, `400 rounds`). *(commit GitHub: `35fb441`)*
 - **Route B (SIREN-first) implementee**: nouvel index global SIREN, nouveau module de retrieval SIREN, branchement conditionnel dans l'inference profile/engine. *(commit GitHub: `3e090b7`)*
 - **Correctifs bloquants Route B**: fix DuckDB `:memory:`, fix champ CRM nom, fix filtre closed/open, ajout CLI `--siren-index` dans le generateur de samples. *(commit GitHub: `c356923`)*
@@ -36,10 +43,10 @@ Route B (ranking SIREN global en phase 1) reste dans le code pour A/B tests, mai
 - `src/xgb_matcher/profile.py` *(commit GitHub: `3e090b7`)*
 
 ## Travail en cours
-- **Regeneration samples V8b (expansion)**: regenerer ranker/decider avec `--enable-siren-expansion`.
-- **Retrain Stage 1 + Stage 2**: entrainer sur la nouvelle distribution de pool (prefilter + expansion).
-- **Recalibration Stage 3**: reestimer le seuil risk model (obligatoire apres shift de distribution).
-- **A/B de verification**: garder Route B disponible uniquement pour comparaison offline.
+- **Execution locale du script merge_and_retrain.bat** : a lancer par l'utilisateur pour generer crm_ok_gt_merged_v1.csv + samples + retrain Stage 1+2.
+- **Recalibration Stage 3** : apres avoir valide S1+S2 sur dev set, recalibrer le Risk Model et mettre a jour le seuil AUTO.
+- **A/B de verification** : garder Route B disponible uniquement pour comparaison offline.
+- **Evaluation post-fusion** : benchmark complet sur les 32 570 cas (coverage pool, Hit@1, latence, segment PRUNED/NIP).
 
 ## Points d'attention
 - **Clarification nomenclature**: "V8" dans les echanges = V8b (V7 + SIREN expansion), pas Route B full.
@@ -59,11 +66,13 @@ Route B (ranking SIREN global en phase 1) reste dans le code pour A/B tests, mai
 | Meta two-stage | `models/xgb_two_stage_meta_*.json` |
 
 ## Prochaines etapes
-1. Construire (au minimum) `siren_to_geo.parquet` (`--geo-only` possible).
-2. Regenerer les samples `ranker` et `decider` avec `--enable-siren-expansion`.
-3. Reentrainer Stage 1 puis Stage 2 sur ces nouveaux samples.
-4. Refaire l'evaluation complete (coverage pool, Hit@1, latence, segment PRUNED/NIP).
-5. Recalibrer Stage 3 (`routing_risk_model.pkl`) et versionner le nouveau seuil AUTO/REVIEW.
+1. Lancer `scripts/merge_and_retrain.bat` en local (pipeline complet 6 etapes).
+2. Verifier `data/crm_ok_gt_merged_v1.csv` : 32 570 lignes attendues.
+3. Apres generation des samples, verifier coverage GT pool sur le dev set (cible : >98.8%).
+4. Reentrainer Stage 1 puis Stage 2 sur les nouveaux samples.
+5. Refaire l'evaluation complete post-fusion (Hit@1, latence, AUTO rate).
+6. Recalibrer Stage 3 (`routing_risk_model.pkl`) avec le nouveau seuil AUTO/REVIEW et commiter.
+7. Pousser la branche `feature/geo-resolution-and-crm-expansion` sur GitHub et ouvrir une PR vers main.
 
 ---
 *Regle projet: chaque modification de code/metier doit citer son commit GitHub dans ce document.*
