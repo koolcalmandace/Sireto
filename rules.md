@@ -66,3 +66,11 @@ Dès transmission des résultats d'un test run, le rapport doit obligatoirement 
   4. **Console Programs & Batch Scripts** : Scripts `.bat` et programmes Python autonomes pour l'exécution et les diagnostics locaux.
 - **Accès propre et immédiat** : Garantir que l'utilisateur dispose d'un accès clair, centralisé et immédiat à l'ensemble des mises à jour majeures du projet.
 
+---
+
+## 8. Standard de Documentation Anti-Bruit & Historisation Segmentée
+- **Zéro bruit opérationnel dans l'historique** : Les micro-ajustements de code, corrections syntaxiques mineures ou dépannages de scripts de confort ne doivent pas être consignés dans l'historique officiel pour éviter toute dégradation de la lisibilité et toute méprise future.
+- **Historisation séquentielle par phases** : Les évolutions majeures (nouvelles versions, pivots d'architecture, benchmarks structurants) sont documentées dans des fichiers séquentiels dédiés dans [`docs/history/`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/history/) (`phase1_*.md`, `phase2_*.md`, `phase3_*.md`).
+- **Rôle du Handover Cockpit** : Le fichier [`handover.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/handover.md) à la racine reste un tableau de bord épuré, centré exclusivement sur l'état d'avancement actif et les actions immédiates.
+
+
