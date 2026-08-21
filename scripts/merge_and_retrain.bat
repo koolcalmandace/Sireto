@@ -21,6 +21,9 @@ REM ============================================================
 
 SETLOCAL
 
+REM Always cd to project root (parent folder of scripts\)
+cd /d "%~dp0\.."
+
 SET PYTHON=py
 SET LOG_DIR=logs\retraining_v8b_merged
 IF NOT EXIST %LOG_DIR% MKDIR %LOG_DIR%
