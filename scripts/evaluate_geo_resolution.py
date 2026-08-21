@@ -61,8 +61,15 @@ def evaluate(
     tag: str,
     prefilter_k: int = 500,
     siren_to_geo_path: Path | None = None,
+    log_file: Path | None = None,
 ) -> Dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    if log_file:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        fh = logging.FileHandler(log_file, encoding="utf-8")
+        fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        logger.addHandler(fh)
 
     store = PartitionedCandidateStore(partitions_dir)
     config = RetrievalConfigV1(
@@ -292,6 +299,7 @@ def main() -> None:
     parser.add_argument("--tag", type=str, default="17k_baseline", help="Tag for report filenames")
     parser.add_argument("--prefilter-k", type=int, default=500, help="Prefilter Top-K candidates")
     parser.add_argument("--siren-to-geo", type=Path, default=Path("data/siren_index/siren_to_geo.parquet"), help="SIREN-to-geo index path")
+    parser.add_argument("--log-file", type=Path, default=None, help="Optional log file path")
     parser.add_argument("--max-rows", type=int, default=0, help="Limit rows (0 for all)")
 
     args = parser.parse_args()
@@ -312,6 +320,7 @@ def main() -> None:
         tag=args.tag,
         prefilter_k=args.prefilter_k,
         siren_to_geo_path=siren_geo,
+        log_file=args.log_file,
     )
 
 
