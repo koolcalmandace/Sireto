@@ -26,6 +26,12 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List
 
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # Ensure project root is in path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -254,7 +260,7 @@ def evaluate(
 
     # Print nicely formatted console report
     print("\n" + "=" * 78)
-    print(f"📊 GEO-RESOLUTION & RETRIEVAL RECALL REPORT — {tag.upper()}")
+    print(f"[REPORT] GEO-RESOLUTION & RETRIEVAL RECALL — {tag.upper()}")
     print("=" * 78)
     print(f"  Total Queries Evaluated:       {total:>7,}")
     print(f"  Execution Time:                {elapsed:>7.1f}s ({qps:>5.1f} queries/s)")
@@ -263,29 +269,29 @@ def evaluate(
     print(f"  GT in Top-{prefilter_k} Prefilter:      {gt_in_prefilter_count:>7,} / {total:,} ({recall_prefilter:.2f}%)")
     print(f"  Prefilter Recall (given Base): {recall_prefilter_given_base:.2f}%")
     print("-" * 78)
-    print("📍 Breakdown by Location Match Type:")
+    print("Location Match Type Breakdown:")
     for loc_k, loc_v in summary["by_loc_match_type"].items():
-        print(f"   • {loc_k:<30} Count: {loc_v['total']:>6,} | Base: {loc_v['base_recall_pct']:>5.2f}% | Top-{prefilter_k}: {loc_v['prefilter_recall_pct']:>5.2f}%")
+        print(f"   - {loc_k:<30} Count: {loc_v['total']:>6,} | Base: {loc_v['base_recall_pct']:>5.2f}% | Top-{prefilter_k}: {loc_v['prefilter_recall_pct']:>5.2f}%")
     print("-" * 78)
-    print("🏢 Breakdown by Administrative State (Actif / Ferme):")
+    print("Administrative State Breakdown (Actif / Ferme):")
     for etat_k, etat_v in summary["by_sirene_etat"].items():
-        print(f"   • {etat_k:<30} Count: {etat_v['total']:>6,} | Base: {etat_v['base_recall_pct']:>5.2f}% | Top-{prefilter_k}: {etat_v['prefilter_recall_pct']:>5.2f}%")
+        print(f"   - {etat_k:<30} Count: {etat_v['total']:>6,} | Base: {etat_v['base_recall_pct']:>5.2f}% | Top-{prefilter_k}: {etat_v['prefilter_recall_pct']:>5.2f}%")
     print("-" * 78)
-    print("⚠️ Loss Reasons Breakdown:")
+    print("Loss Reasons Breakdown:")
     for r_k, r_v in loss_reasons.most_common():
-        print(f"   • {r_k:<30} {r_v:>6,} cases ({(r_v / total * 100):.2f}%)")
+        print(f"   - {r_k:<30} {r_v:>6,} cases ({(r_v / total * 100):.2f}%)")
     print("=" * 78)
 
     # Regression check
     regression = False
     if recall_base < BASELINE_TARGETS["recall_base_min"]:
-        print(f"❌ REGRESSION WARNING: Base recall {recall_base:.2f}% is below target {BASELINE_TARGETS['recall_base_min']}%.")
+        print(f"[WARNING] Base recall {recall_base:.2f}% is below target {BASELINE_TARGETS['recall_base_min']}%.")
         regression = True
     if recall_prefilter < BASELINE_TARGETS["recall_prefilter_min"]:
-        print(f"❌ REGRESSION WARNING: Prefilter recall {recall_prefilter:.2f}% is below target {BASELINE_TARGETS['recall_prefilter_min']}%.")
+        print(f"[WARNING] Prefilter recall {recall_prefilter:.2f}% is below target {BASELINE_TARGETS['recall_prefilter_min']}%.")
         regression = True
     if not regression:
-        print("✅ QUALITY VERDICT: NO REGRESSION DETECTED. ALL TARGETS MET.")
+        print("[OK] QUALITY VERDICT: NO REGRESSION DETECTED. ALL TARGETS MET.")
     print("=" * 78 + "\n")
 
     return summary
