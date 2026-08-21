@@ -11,9 +11,9 @@ La feuille de route d'execution progressive est active :
 **Branche active** : `feature/geo-resolution-and-crm-expansion` (depuis `main`)
 
 ## Actions terminees (fenetre recente)
-- **Etape 1 : Unification Geo-Resolution sans Skew** : Branchement de `store.load_with_geo_resolution()` directement dans `build_candidate_pool()` de `src/xgb_matcher/retrieval.py` et nettoyage de la delegation dans `src/xgb_matcher/infer.py`.
-- **Scripts et Outils d'Evaluation Geo (Etape 2 & 3)** : Creation de `scripts/evaluate_geo_resolution.py` (analyse detaillee base recall, prefilter top-K, loss reasons, stratification `loc_match_type` et `sirene_etat`), avec scripts batch `scripts/run_geo_benchmark_17k.bat` et `scripts/run_geo_benchmark_increment.bat`.
-- **Guide d'Execution Utilisateur** : `docs/plans/step2_geo_validation_execution_guide.md`.
+- **Etape 1 : Unification Geo-Resolution sans Skew** : Branchement de `store.load_with_geo_resolution()` directement dans `build_candidate_pool()` de `src/xgb_matcher/retrieval.py` et nettoyage de la delegation dans `src/xgb_matcher/infer.py`. *(commit GitHub: `fc4396b`)*
+- **Scripts et Outils d'Evaluation Geo (Etape 2 & 3)** : Creation de `scripts/evaluate_geo_resolution.py` (analyse detaillee base recall, prefilter top-K, loss reasons, stratification `loc_match_type` et `sirene_etat`), avec scripts batch `scripts/run_geo_benchmark_17k.bat` et `scripts/run_geo_benchmark_increment.bat`. *(commit GitHub: `fc4396b`)*
+- **Guide d'Execution Utilisateur** : `docs/plans/step2_geo_validation_execution_guide.md`. *(commit GitHub: `fc4396b`)*
 - **Chantier 1 : Resolution Geo Propre** : ajout `load_with_geo_resolution()` + `_discover_insee_codes_from_cp()` dans `partitioned_store.py` ; hierarchie stricte : INSEE -> CP child discovery -> LOG_EMPTY. *(commit GitHub: `c754b97`)*
 - **Chantier 2a : Audit qualite increment CRM 20260817** : 15 516 cas UNSEEN valides, 0 ambigu, 0% chevauchement SIREN, verdict SATISFAISANT. *(commit GitHub: `c754b97`)*
 - **Chantier 2b : Script de fusion controlee** : `scripts/merge_crm_increment.py` produit `data/crm_ok_gt_merged_v1.csv` (32 570 lignes, 0 doublon). *(commit GitHub: `c754b97`)*
