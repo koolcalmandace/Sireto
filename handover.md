@@ -11,6 +11,7 @@ La feuille de route d'execution progressive est active :
 **Branche active** : `feature/geo-resolution-and-crm-expansion` (depuis `main`)
 
 ## Actions terminees (fenetre recente)
+- **Amendement rules.md (Project North Star)** : Ajout de la Regle 7 pour la centralisation, la tracabilite et le versionnage systematique des livrables (planning, resultats, documents, programmes console). *(commit GitHub: `ed4daeb`)*
 - **Etape 1 : Unification Geo-Resolution sans Skew** : Branchement de `store.load_with_geo_resolution()` directement dans `build_candidate_pool()` de `src/xgb_matcher/retrieval.py` et nettoyage de la delegation dans `src/xgb_matcher/infer.py`. *(commit GitHub: `fc4396b`)*
 - **Scripts et Outils d'Evaluation Geo (Etape 2 & 3)** : Creation de `scripts/evaluate_geo_resolution.py` (analyse detaillee base recall, prefilter top-K, loss reasons, stratification `loc_match_type` et `sirene_etat`), avec scripts batch `scripts/run_geo_benchmark_17k.bat` et `scripts/run_geo_benchmark_increment.bat`. *(commit GitHub: `cd2c3b3`)*
 - **Guide d'Execution Utilisateur** : `docs/plans/step2_geo_validation_execution_guide.md`. *(commit GitHub: `fc4396b`)*
