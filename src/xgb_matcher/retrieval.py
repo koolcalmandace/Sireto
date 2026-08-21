@@ -330,21 +330,26 @@ def build_candidate_pool(
         return result
 
     # === V7: Standard geo-partitioned retrieval (default) ===
-    # Step 1: Load base candidates (strict insee_then_postcode + mega policy)
+    # Step 1: Load base candidates (strict geo resolution: INSEE -> CP child discovery -> empty)
+    crm_id = str(crm_row.get("crm_id") or crm_row.get("ID") or crm_row.get("id") or "<unknown>")
     if timer:
         with timer.stage("partition_load"):
-            base_candidates = store.load_by_insee_then_postcode(
+            base_candidates = store.load_with_geo_resolution(
                 insee,
                 postcode,
+                crm_id=crm_id,
                 mega_insee_max_rows=config.mega_insee_max_rows,
                 mega_insee_policy=config.mega_insee_policy,
+                logger=_logger,
             )
     else:
-        base_candidates = store.load_by_insee_then_postcode(
+        base_candidates = store.load_with_geo_resolution(
             insee,
             postcode,
+            crm_id=crm_id,
             mega_insee_max_rows=config.mega_insee_max_rows,
             mega_insee_policy=config.mega_insee_policy,
+            logger=_logger,
         )
 
     result.pool_sizes["base"] = len(base_candidates)
