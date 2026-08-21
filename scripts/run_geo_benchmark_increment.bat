@@ -27,6 +27,7 @@ echo ============================================================
 IF ERRORLEVEL 1 (
     echo.
     echo [ECHEC] L'evaluation a rencontre une erreur.
+    pause
     EXIT /B 1
 )
 
@@ -36,7 +37,9 @@ echo [SUCCES] Evaluation terminee avec succes !
 echo Rapports generes :
 echo   - Resume JSON : reports\geo_validation\geo_benchmark_15k_increment_summary.json
 echo   - Details CSV : reports\geo_validation\geo_benchmark_15k_increment_details.csv
-echo   - Log console : %LOG_DIR%\run_geo_benchmark_increment.log
+echo   - Log fichier : %LOG_DIR%\run_geo_benchmark_increment.log
 echo ============================================================
+echo.
+pause
 
 ENDLOCAL

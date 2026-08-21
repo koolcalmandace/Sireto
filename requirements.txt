@@ -1,7 +1,9 @@
-tqdm
-duckdb
-scikit-learn
-# P1: Dense retrieval (optional — install for hybrid FAISS mode)
-# faiss-cpu
-# sentence-transformers
-# torch
+pyarrow>=25.0.0
+pandas>=2.2.0
+scikit-learn>=1.4.0
+duckdb>=1.0.0
+tqdm>=4.66.0
+xgboost>=2.0.0
+rapidfuzz>=3.9.0
+pyyaml>=6.0.0
+pytest>=8.0.0
