@@ -54,3 +54,15 @@ Dès transmission des résultats d'un test run, le rapport doit obligatoirement 
 - **Précision SIREN & SIRET** :
   - SIREN Precision (identification de l'entité juridique)
   - SIRET Precision (identification de l'établissement exact)
+
+---
+
+## 7. Référentiel Centralisé & Traçabilité Complète (Project North Star)
+- **Dossier local de référence** : `C:\Users\Kabouassi\Desktop\Clean House\Project North Star`
+- **Exigence de versionnage et de synchronisation** : Toutes les modifications et livrables majeurs doivent être systématiquement documentés et versionnés dans le dépôt GitHub `Sireto.dev` :
+  1. **Planning History & Roadmap** : Plans de travail, séquences d'étapes et décisions.
+  2. **Benchmark Results & Reports** : Rapports JSON/CSV des runs d'évaluation, logs d'analyse de régression et métriques officielles.
+  3. **Technical Documents & Specs** : Guides d'architecture, analyses de composants et protocoles d'exécution.
+  4. **Console Programs & Batch Scripts** : Scripts `.bat` et programmes Python autonomes pour l'exécution et les diagnostics locaux.
+- **Accès propre et immédiat** : Garantir que l'utilisateur dispose d'un accès clair, centralisé et immédiat à l'ensemble des mises à jour majeures du projet.
+
