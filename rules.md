@@ -73,4 +73,19 @@ Dès transmission des résultats d'un test run, le rapport doit obligatoirement 
 - **Historisation séquentielle par phases** : Les évolutions majeures (nouvelles versions, pivots d'architecture, benchmarks structurants) sont documentées dans des fichiers séquentiels dédiés dans [`docs/history/`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/history/) (`phase1_*.md`, `phase2_*.md`, `phase3_*.md`).
 - **Rôle du Handover Cockpit** : Le fichier [`handover.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/handover.md) à la racine reste un tableau de bord épuré, centré exclusivement sur l'état d'avancement actif et les actions immédiates.
 
+---
+
+## 9. Standard Universel de Résilience des Batchs : Checkpointing Atomique & PowerGuard
+Tout script de calcul lourd ou programme lancé via fichier `.bat` (benchmarks, générations de samples, récoltes, entraînements) doit obligatoirement respecter l'architecture de résilience ([`docs/architecture/safe_batch_execution_standard.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/architecture/safe_batch_execution_standard.md)) :
+1. **Checkpointing JSON Atomique (`CheckpointManager`)** :
+   - Écriture atomique permanente du progrès et des métriques accumulées (`.checkpoints/checkpoint_<tag>.json`).
+   - Reprise automatique par défaut (`--resume`) en cas de relance suite à une interruption, sans recalculer les éléments déjà traités.
+   - Streaming direct des résultats détaillés en CSV au fur et à mesure de l'avancement.
+   - Clôture et archivage automatique du checkpoint à 100% de complétion pour permettre un départ à zéro lors des futurs runs.
+2. **Supervision Veille et Sécurité Thermique (`PowerMonitor`)** :
+   - Détection proactive des mises en veille, verrouillages de session et fermetures de capot.
+   - Finalisation immédiate de la requête en cours, vidage des fichiers sur disque, et cession totale de la charge processeur (0% CPU).
+   - Autorisation d'une veille matérielle classique, froide et sans danger lors du transport de l'ordinateur en sac fermé.
+   - Reprise automatique du traitement dès la détection du réveil système.
+
 

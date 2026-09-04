@@ -5,10 +5,17 @@ evaluate_geo_resolution.py — Comprehensive Geo-Resolution & Retrieval Recall E
 Evaluates candidate pool coverage and retrieval recall across a CRM Ground Truth dataset
 (e.g., the 17,054 baseline or the 15,516 increment or the 32,570 merged dataset).
 
+Key Safety Features:
+  - Checkpoint & Auto-Resume: Automatically resumes interrupted jobs from where they stopped.
+  - PowerGuard Monitor: Detects Windows sleep / lid-close / lock events, completes the active query,
+    atomically saves the checkpoint, flushes CSV logs, and yields CPU load to 0% to allow safe,
+    cool hardware sleep. Auto-resumes when the system wakes up.
+
 Outputs:
   - Console summary table with overall and segment-by-segment recall
-  - JSON summary report (reports/geo_validation/summary_<name>.json)
-  - Detailed CSV log with per-query diagnostic (reports/geo_validation/details_<name>.csv)
+  - JSON summary report (reports/geo_validation/geo_benchmark_<name>_summary.json)
+  - Detailed CSV log with per-query diagnostic (reports/geo_validation/geo_benchmark_<name>_details.csv)
+  - Atomic checkpoints in (reports/geo_validation/.checkpoints/checkpoint_<name>.json)
 
 Usage:
     python scripts/evaluate_geo_resolution.py --crm data/crm_ok_gt.csv --tag 17k_baseline
@@ -24,7 +31,7 @@ import sys
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -35,10 +42,12 @@ if hasattr(sys.stdout, "reconfigure"):
 # Ensure project root is in path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.xgb_matcher.checkpoint import CheckpointManager
+from src.xgb_matcher.features import preprocess_crm_row
 from src.xgb_matcher.partitioned_store import PartitionedCandidateStore
+from src.xgb_matcher.power_guard import PowerMonitor
 from src.xgb_matcher.retrieval import build_candidate_pool
 from src.xgb_matcher.retrieval_config import RetrievalConfigV1
-from src.xgb_matcher.features import preprocess_crm_row
 from src.xgb_matcher.tfidf_cache import TfidfPersistentCache
 from src.xgb_matcher.timing import PipelineTimer
 
@@ -68,8 +77,16 @@ def evaluate(
     prefilter_k: int = 500,
     siren_to_geo_path: Path | None = None,
     log_file: Path | None = None,
+    crm_path: Path | None = None,
+    resume: bool = True,
+    fresh: bool = False,
+    checkpoint_interval: int = 100,
+    enable_power_monitor: bool = True,
+    pause_on_lock: bool = True,
+    idle_timeout_seconds: float = 300.0,
 ) -> Dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_dir = output_dir / ".checkpoints"
 
     if log_file:
         log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -95,124 +112,172 @@ def evaluate(
     cache = TfidfPersistentCache(config.signature().hash)
     timer = PipelineTimer()
 
-    total = 0
-    gt_in_base_count = 0
-    gt_in_filtered_count = 0
-    gt_in_prefilter_count = 0
+    # Checkpoint management
+    ckpt = CheckpointManager(
+        tag=tag,
+        checkpoint_dir=ckpt_dir,
+        total_rows=len(rows),
+        crm_path=crm_path,
+        config_signature=config.signature().hash,
+        save_interval=checkpoint_interval,
+    )
 
-    # Stratified stats
-    by_loc_type: Dict[str, Dict[str, int]] = {}
-    by_etat: Dict[str, Dict[str, int]] = {}
-    loss_reasons: Counter = Counter()
+    is_resumed = False
+    if resume and not fresh and ckpt.is_resumable():
+        is_resumed = ckpt.load()
 
-    details: List[Dict[str, Any]] = []
+    # Setup Details CSV writer
+    details_path = output_dir / f"geo_benchmark_{tag}_details.csv"
+    detail_fieldnames = [
+        "crm_id",
+        "crm_name",
+        "crm_insee",
+        "crm_cp",
+        "gt_siret",
+        "loc_type",
+        "sirene_etat",
+        "base_pool_size",
+        "filtered_pool_size",
+        "prefilter_pool_size",
+        "gt_in_base",
+        "gt_in_filtered",
+        "gt_in_prefilter",
+        "loss_reason",
+    ]
+    ckpt.init_details_writer(details_path, detail_fieldnames, resume=is_resumed)
 
-    logger.info("Evaluating %d CRM ground truth rows...", len(rows))
-    t0 = time.perf_counter()
+    # Power Monitor setup
+    power_mon = PowerMonitor(
+        pause_on_lock=pause_on_lock,
+        idle_timeout_seconds=idle_timeout_seconds,
+    )
+    if enable_power_monitor:
+        power_mon.start()
 
-    for idx, r in enumerate(rows):
-        gt_siret = (r.get("gt_siret") or r.get("ground_truth_siret") or "").strip()
-        if not gt_siret:
-            continue
+    logger.info(
+        "Evaluating %d CRM rows (Resumed: %s, Starting at idx: %d)...",
+        len(rows),
+        is_resumed,
+        ckpt.last_processed_idx + 1,
+    )
 
-        crm_insee = (r.get("crm_insee") or r.get("insee") or "").strip()
-        crm_cp = (r.get("crm_cp") or r.get("postcode") or "").strip()
-        crm_name = (r.get("crm_name") or r.get("nom") or "").strip()
-        crm_adresse = (r.get("crm_adresse") or r.get("adresse") or "").strip()
-        crm_commune = (r.get("crm_commune") or r.get("ville") or "").strip()
-        crm_id = (r.get("crm_id") or r.get("id") or f"ROW_{idx}").strip()
-        loc_type = (r.get("loc_match_type") or ("INSEE" if crm_insee else "CP_ONLY")).strip()
-        etat = (r.get("sirene_etat") or "UNKNOWN").strip().upper()
+    try:
+        t_batch_start = time.perf_counter()
 
-        crm_row = {
-            "crm_id": crm_id,
-            "crm_name": crm_name,
-            "crm_address": crm_adresse,
-            "crm_city": crm_commune,
-            "postcode": crm_cp,
-            "insee": crm_insee,
-        }
-        crm_pre = preprocess_crm_row(crm_row)
+        for idx, r in enumerate(rows):
+            # Skip rows already processed in previous run
+            if is_resumed and idx <= ckpt.last_processed_idx:
+                continue
 
-        tfidf_cache: Dict = {}
-        res = build_candidate_pool(
-            store=store,
-            crm_row=crm_row,
-            crm_pre=crm_pre,
-            config=config,
-            tfidf_cache=tfidf_cache,
-            gt_siret=gt_siret,
-            persistent_cache=cache,
-            timer=timer,
-            siren_to_geo=siren_to_geo,
-        )
+            gt_siret = (r.get("gt_siret") or r.get("ground_truth_siret") or "").strip()
+            if not gt_siret:
+                continue
 
-        total += 1
-        gt_in_base = bool(res.gt_in_base_pool)
-        gt_in_filtered = bool(res.gt_in_filtered_pool)
-        gt_in_prefilter = bool(res.gt_in_tfidf_pool)
-        loss_reason = res.loss_reason or ("NOT_IN_BASE" if not gt_in_base else "")
+            t_query_0 = time.perf_counter()
 
-        if gt_in_base:
-            gt_in_base_count += 1
-        if gt_in_filtered:
-            gt_in_filtered_count += 1
-        if gt_in_prefilter:
-            gt_in_prefilter_count += 1
-        if loss_reason:
-            loss_reasons[loss_reason] += 1
+            crm_insee = (r.get("crm_insee") or r.get("insee") or "").strip()
+            crm_cp = (r.get("crm_cp") or r.get("postcode") or "").strip()
+            crm_name = (r.get("crm_name") or r.get("nom") or "").strip()
+            crm_adresse = (r.get("crm_adresse") or r.get("adresse") or "").strip()
+            crm_commune = (r.get("crm_commune") or r.get("ville") or "").strip()
+            crm_id = (r.get("crm_id") or r.get("id") or f"ROW_{idx}").strip()
+            loc_type = (r.get("loc_match_type") or ("INSEE" if crm_insee else "CP_ONLY")).strip()
+            etat = (r.get("sirene_etat") or "UNKNOWN").strip().upper()
 
-        # Stratify by loc_type
-        if loc_type not in by_loc_type:
-            by_loc_type[loc_type] = {"total": 0, "base": 0, "prefilter": 0}
-        by_loc_type[loc_type]["total"] += 1
-        if gt_in_base:
-            by_loc_type[loc_type]["base"] += 1
-        if gt_in_prefilter:
-            by_loc_type[loc_type]["prefilter"] += 1
+            crm_row = {
+                "crm_id": crm_id,
+                "crm_name": crm_name,
+                "crm_address": crm_adresse,
+                "crm_city": crm_commune,
+                "postcode": crm_cp,
+                "insee": crm_insee,
+            }
+            crm_pre = preprocess_crm_row(crm_row)
 
-        # Stratify by etat
-        if etat not in by_etat:
-            by_etat[etat] = {"total": 0, "base": 0, "prefilter": 0}
-        by_etat[etat]["total"] += 1
-        if gt_in_base:
-            by_etat[etat]["base"] += 1
-        if gt_in_prefilter:
-            by_etat[etat]["prefilter"] += 1
-
-        details.append({
-            "crm_id": crm_id,
-            "crm_name": crm_name,
-            "crm_insee": crm_insee,
-            "crm_cp": crm_cp,
-            "gt_siret": gt_siret,
-            "loc_type": loc_type,
-            "sirene_etat": etat,
-            "base_pool_size": res.pool_sizes.get("base", 0),
-            "filtered_pool_size": res.pool_sizes.get("filtered", 0),
-            "prefilter_pool_size": len(res.candidates),
-            "gt_in_base": gt_in_base,
-            "gt_in_filtered": gt_in_filtered,
-            "gt_in_prefilter": gt_in_prefilter,
-            "loss_reason": loss_reason,
-        })
-
-        if total % 2000 == 0:
-            logger.info(
-                "Processed %d/%d (%.1f%%) — Base Recall: %.2f%%, Prefilter@%d: %.2f%%",
-                total, len(rows), (total / len(rows)) * 100,
-                (gt_in_base_count / total) * 100,
-                prefilter_k,
-                (gt_in_prefilter_count / total) * 100,
+            tfidf_cache: Dict = {}
+            res = build_candidate_pool(
+                store=store,
+                crm_row=crm_row,
+                crm_pre=crm_pre,
+                config=config,
+                tfidf_cache=tfidf_cache,
+                gt_siret=gt_siret,
+                persistent_cache=cache,
+                timer=timer,
+                siren_to_geo=siren_to_geo,
             )
 
-    elapsed = time.perf_counter() - t0
+            gt_in_base = bool(res.gt_in_base_pool)
+            gt_in_filtered = bool(res.gt_in_filtered_pool)
+            gt_in_prefilter = bool(res.gt_in_tfidf_pool)
+            loss_reason = res.loss_reason or ("NOT_IN_BASE" if not gt_in_base else "")
+
+            detail_entry = {
+                "crm_id": crm_id,
+                "crm_name": crm_name,
+                "crm_insee": crm_insee,
+                "crm_cp": crm_cp,
+                "gt_siret": gt_siret,
+                "loc_type": loc_type,
+                "sirene_etat": etat,
+                "base_pool_size": res.pool_sizes.get("base", 0),
+                "filtered_pool_size": res.pool_sizes.get("filtered", 0),
+                "prefilter_pool_size": len(res.candidates),
+                "gt_in_base": gt_in_base,
+                "gt_in_filtered": gt_in_filtered,
+                "gt_in_prefilter": gt_in_prefilter,
+                "loss_reason": loss_reason,
+            }
+
+            delta_t = time.perf_counter() - t_query_0
+            ckpt.record_query(
+                idx=idx,
+                gt_in_base=gt_in_base,
+                gt_in_filtered=gt_in_filtered,
+                gt_in_prefilter=gt_in_prefilter,
+                loc_type=loc_type,
+                etat=etat,
+                loss_reason=loss_reason,
+                detail_row=detail_entry,
+                elapsed_delta=delta_t,
+            )
+
+            if ckpt.total_queries % 2000 == 0:
+                logger.info(
+                    "Processed %d/%d (%.1f%%) — Base Recall: %.2f%%, Prefilter@%d: %.2f%%",
+                    ckpt.total_queries,
+                    len(rows),
+                    (ckpt.total_queries / len(rows)) * 100,
+                    (ckpt.gt_in_base_count / max(ckpt.total_queries, 1)) * 100,
+                    prefilter_k,
+                    (ckpt.gt_in_prefilter_count / max(ckpt.total_queries, 1)) * 100,
+                )
+
+            # Check if power monitor signaled sleep / lid close / lock
+            if enable_power_monitor and power_mon.should_pause():
+                logger.info("[CHECKPOINT] Flushing state before entering safe pause...")
+                ckpt.save(status="PAUSED", force=True)
+                power_mon.wait_for_resume()
+                logger.info("[CHECKPOINT] Resuming loop after safe sleep pause.")
+
+    finally:
+        if enable_power_monitor:
+            power_mon.stop()
+
+    total = ckpt.total_queries
+    elapsed = ckpt.elapsed_seconds
     qps = total / max(elapsed, 0.001)
+
+    gt_in_base_count = ckpt.gt_in_base_count
+    gt_in_filtered_count = ckpt.gt_in_filtered_count
+    gt_in_prefilter_count = ckpt.gt_in_prefilter_count
 
     recall_base = (gt_in_base_count / total * 100) if total else 0.0
     recall_filtered = (gt_in_filtered_count / total * 100) if total else 0.0
     recall_prefilter = (gt_in_prefilter_count / total * 100) if total else 0.0
-    recall_prefilter_given_base = (gt_in_prefilter_count / gt_in_base_count * 100) if gt_in_base_count else 0.0
+    recall_prefilter_given_base = (
+        (gt_in_prefilter_count / gt_in_base_count * 100) if gt_in_base_count else 0.0
+    )
 
     summary = {
         "tag": tag,
@@ -231,7 +296,7 @@ def evaluate(
                 "base_recall_pct": round((v["base"] / v["total"] * 100), 2) if v["total"] else 0,
                 "prefilter_recall_pct": round((v["prefilter"] / v["total"] * 100), 2) if v["total"] else 0,
             }
-            for k, v in by_loc_type.items()
+            for k, v in ckpt.by_loc_type.items()
         },
         "by_sirene_etat": {
             k: {
@@ -239,9 +304,9 @@ def evaluate(
                 "base_recall_pct": round((v["base"] / v["total"] * 100), 2) if v["total"] else 0,
                 "prefilter_recall_pct": round((v["prefilter"] / v["total"] * 100), 2) if v["total"] else 0,
             }
-            for k, v in by_etat.items()
+            for k, v in ckpt.by_etat.items()
         },
-        "loss_reasons": dict(loss_reasons.most_common()),
+        "loss_reasons": dict(ckpt.loss_reasons.most_common()),
     }
 
     # Save summary JSON
@@ -249,14 +314,10 @@ def evaluate(
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
     logger.info("Saved summary report to %s", summary_path)
-
-    # Save details CSV
-    details_path = output_dir / f"geo_benchmark_{tag}_details.csv"
-    with open(details_path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(details[0].keys()), delimiter=";")
-        writer.writeheader()
-        writer.writerows(details)
     logger.info("Saved query-level details to %s", details_path)
+
+    # Finalize checkpoint (archives checkpoint so future fresh runs execute from 0)
+    ckpt.finalize_completed(summary)
 
     # Print nicely formatted console report
     print("\n" + "=" * 78)
@@ -271,15 +332,19 @@ def evaluate(
     print("-" * 78)
     print("Location Match Type Breakdown:")
     for loc_k, loc_v in summary["by_loc_match_type"].items():
-        print(f"   - {loc_k:<30} Count: {loc_v['total']:>6,} | Base: {loc_v['base_recall_pct']:>5.2f}% | Top-{prefilter_k}: {loc_v['prefilter_recall_pct']:>5.2f}%")
+        print(
+            f"   - {loc_k:<30} Count: {loc_v['total']:>6,} | Base: {loc_v['base_recall_pct']:>5.2f}% | Top-{prefilter_k}: {loc_v['prefilter_recall_pct']:>5.2f}%"
+        )
     print("-" * 78)
     print("Administrative State Breakdown (Actif / Ferme):")
     for etat_k, etat_v in summary["by_sirene_etat"].items():
-        print(f"   - {etat_k:<30} Count: {etat_v['total']:>6,} | Base: {etat_v['base_recall_pct']:>5.2f}% | Top-{prefilter_k}: {etat_v['prefilter_recall_pct']:>5.2f}%")
+        print(
+            f"   - {etat_k:<30} Count: {etat_v['total']:>6,} | Base: {etat_v['base_recall_pct']:>5.2f}% | Top-{prefilter_k}: {etat_v['prefilter_recall_pct']:>5.2f}%"
+        )
     print("-" * 78)
     print("Loss Reasons Breakdown:")
-    for r_k, r_v in loss_reasons.most_common():
-        print(f"   - {r_k:<30} {r_v:>6,} cases ({(r_v / total * 100):.2f}%)")
+    for r_k, r_v in ckpt.loss_reasons.most_common():
+        print(f"   - {r_k:<30} {r_v:>6,} cases ({(r_v / max(total, 1) * 100):.2f}%)")
     print("=" * 78)
 
     # Regression check
@@ -288,7 +353,9 @@ def evaluate(
         print(f"[WARNING] Base recall {recall_base:.2f}% is below target {BASELINE_TARGETS['recall_base_min']}%.")
         regression = True
     if recall_prefilter < BASELINE_TARGETS["recall_prefilter_min"]:
-        print(f"[WARNING] Prefilter recall {recall_prefilter:.2f}% is below target {BASELINE_TARGETS['recall_prefilter_min']}%.")
+        print(
+            f"[WARNING] Prefilter recall {recall_prefilter:.2f}% is below target {BASELINE_TARGETS['recall_prefilter_min']}%."
+        )
         regression = True
     if not regression:
         print("[OK] QUALITY VERDICT: NO REGRESSION DETECTED. ALL TARGETS MET.")
@@ -300,13 +367,56 @@ def evaluate(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate Geo-Resolution & Retrieval Recall")
     parser.add_argument("--crm", type=Path, default=Path("data/crm_ok_gt.csv"), help="CRM Ground Truth CSV")
-    parser.add_argument("--partitions-dir", type=Path, default=Path("data/candidates_v7_all"), help="Partitions directory")
-    parser.add_argument("--output-dir", type=Path, default=Path("reports/geo_validation"), help="Output reports directory")
+    parser.add_argument(
+        "--partitions-dir", type=Path, default=Path("data/candidates_v7_all"), help="Partitions directory"
+    )
+    parser.add_argument(
+        "--output-dir", type=Path, default=Path("reports/geo_validation"), help="Output reports directory"
+    )
     parser.add_argument("--tag", type=str, default="17k_baseline", help="Tag for report filenames")
     parser.add_argument("--prefilter-k", type=int, default=500, help="Prefilter Top-K candidates")
-    parser.add_argument("--siren-to-geo", type=Path, default=Path("data/siren_index/siren_to_geo.parquet"), help="SIREN-to-geo index path")
+    parser.add_argument(
+        "--siren-to-geo",
+        type=Path,
+        default=Path("data/siren_index/siren_to_geo.parquet"),
+        help="SIREN-to-geo index path",
+    )
     parser.add_argument("--log-file", type=Path, default=None, help="Optional log file path")
     parser.add_argument("--max-rows", type=int, default=0, help="Limit rows (0 for all)")
+    parser.add_argument(
+        "--no-resume", dest="resume", action="store_false", help="Disable auto-resume from checkpoint"
+    )
+    parser.add_argument(
+        "--fresh", action="store_true", help="Force fresh restart (ignore existing checkpoint)"
+    )
+    parser.add_argument(
+        "--checkpoint-interval", type=int, default=100, help="Save checkpoint every N queries"
+    )
+    parser.add_argument(
+        "--no-power-monitor",
+        dest="enable_power_monitor",
+        action="store_false",
+        help="Disable Windows power / sleep monitor",
+    )
+    parser.add_argument(
+        "--pause-on-lock",
+        dest="pause_on_lock",
+        action="store_true",
+        default=True,
+        help="Pause computation when Windows session is locked (Default: True)",
+    )
+    parser.add_argument(
+        "--no-pause-on-lock",
+        dest="pause_on_lock",
+        action="store_false",
+        help="Disable automatic pausing on Windows session lock",
+    )
+    parser.add_argument(
+        "--idle-timeout",
+        type=float,
+        default=300.0,
+        help="Inactivity timeout in seconds before pausing computation (Default: 300.0 = 5 min, 0 to disable)",
+    )
 
     args = parser.parse_args()
 
@@ -327,6 +437,13 @@ def main() -> None:
         prefilter_k=args.prefilter_k,
         siren_to_geo_path=siren_geo,
         log_file=args.log_file,
+        crm_path=args.crm,
+        resume=args.resume,
+        fresh=args.fresh,
+        checkpoint_interval=args.checkpoint_interval,
+        enable_power_monitor=args.enable_power_monitor,
+        pause_on_lock=args.pause_on_lock,
+        idle_timeout_seconds=args.idle_timeout,
     )
 
 

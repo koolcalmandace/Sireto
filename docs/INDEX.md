@@ -22,6 +22,7 @@ graph TD
 ## 1. 🏗️ Architecture & Pipeline Specs
 Documentation décrivant les flux, principes et spécifications techniques du pipeline :
 * [`architecture_v0.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/architecture_v0.md) : Guide d'architecture baseline complet de bout en bout (Étapes 0 à 8, du pré-retrieval au post-decider fallback).
+* [`architecture/safe_batch_execution_standard.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/architecture/safe_batch_execution_standard.md) : **Standard Universel de Résilience des Batchs** (Checkpointing JSON atomique, reprise `--resume`, gestionnaire de veille `PowerMonitor` à 0% CPU).
 * [`DECISIONS.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/DECISIONS.md) : Registre officiel des décisions d'architecture (SSOT, zéro data leakage, pivot V8b).
 * [`AGENTS.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/AGENTS.md) : Règles directrices, diagrammes Mermaid Pipe V6 et Pipe V7.
 
@@ -31,6 +32,7 @@ Documentation décrivant les flux, principes et spécifications techniques du pi
 Analyses approfondies, métriques empiriques et revues de code composant par composant :
 * [`analysis/analysis_step0_crm_ingestion.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/analysis/analysis_step0_crm_ingestion.md) : Analyse de l'Étape 0 (Ingestion CRM, normalisation, regex voies, découplage retrieval/scoring sur 17k requêtes).
 * [`analysis/analysis_step1_partitioned_store.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/analysis/analysis_step1_partitioned_store.md) : Analyse de l'Étape 1 (Stockage Hive Parquet, manifeste $O(1)$, politique méga-communes, cache LRU).
+* [`analysis/analysis_step2_geo_benchmark_17k_baseline.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/analysis/analysis_step2_geo_benchmark_17k_baseline.md) : Analyse de l'Étape 2 (Benchmark Geo-Resolution 17k baseline, 97.18% base recall, zéro fuite).
 * [`analysis/audit_crm_increment_20260817.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/analysis/audit_crm_increment_20260817.md) : Audit qualité de l'incrément CRM (15 516 cas UNSEEN, zéro doublon SIREN, validation de fusion).
 
 ---

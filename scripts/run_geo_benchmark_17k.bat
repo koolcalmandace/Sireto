@@ -18,6 +18,9 @@ IF NOT EXIST %LOG_DIR% MKDIR %LOG_DIR%
 echo.
 echo ============================================================
 echo EXECUTION DU BENCHMARK GEO-RESOLUTION (17 054 CRM Baseline)
+echo [SECURITE ACTIVE] Checkpointing atomique + Moniteur Veille PowerGuard
+echo   - Reprise automatique en cas d'interruption
+echo   - Pause propre lors de la veille / fermeture capot (0%% CPU)
 echo ============================================================
 %PYTHON% scripts\evaluate_geo_resolution.py ^
     --crm data\crm_ok_gt.csv ^
