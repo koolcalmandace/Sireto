@@ -40,3 +40,4 @@
 ## 4. Commits Majeurs Associés
 * `c754b97` : Résolution géo stricte dans `partitioned_store.py` et script de fusion CRM.
 * `fc4396b` : Unification de `build_candidate_pool` dans `retrieval.py` et script d'évaluation `evaluate_geo_resolution.py`.
+* `f1b4854` : Standard universel de résilience des batchs (`CheckpointManager`, `PowerMonitor` avec détection d'inactivité 5 minutes via `GetLastInputInfo`, pause 0% CPU sur verrouillage et reprise sans heurts).
