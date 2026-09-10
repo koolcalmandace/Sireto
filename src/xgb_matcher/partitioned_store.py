@@ -19,7 +19,9 @@ import pyarrow.parquet as pq
 from .blocking import normalize_code, department_from_code
 
 # Maximum number of entries per store cache (INSEE / CP / dept)
-_MAX_STORE_CACHE_SIZE = 5
+# Set to 300 to balance high cache-hit rates across recurring cities
+# while preventing excessive Python RAM usage on large metropolitan partitions.
+_MAX_STORE_CACHE_SIZE = 300
 
 # Columns actually used by features, naming, filtering, and output.
 # Excludes unused columns (nom_usage_ul, pseudonyme_ul) to reduce I/O and RAM.
@@ -37,14 +39,12 @@ REQUIRED_COLUMNS = [
 
 
 class PartitionedCandidateStore:
-    """Lazy loader for candidates by INSEE / CP / department."""
+    """Lazy loader for candidates by INSEE / CP / department with O(1) direct file reads."""
 
     def __init__(self, partitions_dir: Path):
         self.partitions_dir = Path(partitions_dir)
-        insee_part = ds.partitioning(pa.schema([("insee", pa.string())]), flavor="hive")
-        cp_part = ds.partitioning(pa.schema([("postcode", pa.string())]), flavor="hive")
-        self._dataset_insee = ds.dataset(self.partitions_dir / "insee", format="parquet", partitioning=insee_part)
-        self._dataset_cp = ds.dataset(self.partitions_dir / "cp", format="parquet", partitioning=cp_part)
+        self._dataset_insee_lazy = None
+        self._dataset_cp_lazy = None
         self._cache_insee: OrderedDict[str, List[dict]] = OrderedDict()
         self._cache_cp: OrderedDict[str, List[dict]] = OrderedDict()
         self._cache_cp_insee: OrderedDict[str, List[dict]] = OrderedDict()
@@ -52,10 +52,25 @@ class PartitionedCandidateStore:
         self._cache_insee_count: OrderedDict[str, int] = OrderedDict()
         self._manifest_insee_counts = self._load_insee_manifest_counts()
 
-        # Determine which columns are actually present in the datasets
-        # (some columns like pm_dirigeant_names may be absent in older partitions)
-        self._columns_insee = self._available_columns(self._dataset_insee)
-        self._columns_cp = self._available_columns(self._dataset_cp)
+        # Fast schema inspection from a sample parquet file (O(1), avoids scanning all folders)
+        self._columns_insee = self._detect_sample_columns(self.partitions_dir / "insee")
+        self._columns_cp = self._detect_sample_columns(self.partitions_dir / "cp")
+
+    @staticmethod
+    def _detect_sample_columns(partition_root: Path) -> List[str] | None:
+        """Inspect column names from the first available parquet file in O(1) without scanning."""
+        if not partition_root.exists():
+            return None
+        try:
+            for entry in partition_root.iterdir():
+                if entry.is_dir():
+                    for f in entry.glob("*.parquet"):
+                        schema_names = set(pq.read_schema(f).names)
+                        cols = [c for c in REQUIRED_COLUMNS if c in schema_names]
+                        return cols if cols else None
+        except Exception:
+            pass
+        return REQUIRED_COLUMNS
 
     def _load_insee_manifest_counts(self) -> Dict[str, int]:
         """Load optional V7 manifest counts for O(1) INSEE row lookup."""
@@ -76,16 +91,6 @@ class PartitionedCandidateStore:
             except Exception:
                 continue
         return counts
-
-    @staticmethod
-    def _available_columns(dataset: ds.Dataset) -> List[str] | None:
-        """Return REQUIRED_COLUMNS filtered to those present in the dataset schema."""
-        try:
-            schema_names = set(dataset.schema.names)
-            cols = [c for c in REQUIRED_COLUMNS if c in schema_names]
-            return cols if cols else None
-        except Exception:
-            return None
 
     @staticmethod
     def _coerce_candidate_types(rows: List[dict]) -> List[dict]:
@@ -114,13 +119,20 @@ class PartitionedCandidateStore:
             self._cache_insee_count[code] = count
             self._evict_lru(self._cache_insee_count, _MAX_STORE_CACHE_SIZE)
             return count
-        try:
-            count = self._dataset_insee.count_rows(filter=ds.field("insee") == code)
-        except Exception:
-            return 0
-        self._cache_insee_count[code] = int(count)
-        self._evict_lru(self._cache_insee_count, _MAX_STORE_CACHE_SIZE)
-        return int(count)
+
+        # O(1) metadata check on direct partition file
+        insee_folder = self.partitions_dir / "insee" / f"insee={code}"
+        if insee_folder.is_dir():
+            try:
+                parquet_files = list(insee_folder.glob("*.parquet"))
+                if parquet_files:
+                    count = sum(pq.read_metadata(f).num_rows for f in parquet_files)
+                    self._cache_insee_count[code] = count
+                    self._evict_lru(self._cache_insee_count, _MAX_STORE_CACHE_SIZE)
+                    return count
+            except Exception:
+                pass
+        return 0
 
     def load_by_insee(self, insee: Optional[str]) -> List[dict]:
         code = normalize_code(insee)
@@ -129,17 +141,22 @@ class PartitionedCandidateStore:
         if code in self._cache_insee:
             self._cache_insee.move_to_end(code)
             return self._cache_insee[code]
-        try:
-            table = self._dataset_insee.to_table(
-                filter=ds.field("insee") == code,
-                columns=self._columns_insee,
-            )
-        except Exception:
-            return []
-        rows = self._coerce_candidate_types(table.to_pylist())
-        self._cache_insee[code] = rows
-        self._evict_lru(self._cache_insee, _MAX_STORE_CACHE_SIZE)
-        return rows
+
+        # O(1) Direct file read without traversing 30k folders
+        insee_folder = self.partitions_dir / "insee" / f"insee={code}"
+        if insee_folder.is_dir():
+            try:
+                parquet_files = list(insee_folder.glob("*.parquet"))
+                if parquet_files:
+                    tables = [pq.read_table(f, columns=self._columns_insee) for f in parquet_files]
+                    table = pa.concat_tables(tables) if len(tables) > 1 else tables[0]
+                    rows = self._coerce_candidate_types(table.to_pylist())
+                    self._cache_insee[code] = rows
+                    self._evict_lru(self._cache_insee, _MAX_STORE_CACHE_SIZE)
+                    return rows
+            except Exception:
+                pass
+        return []
 
     def load_by_postcode(self, postcode: Optional[str]) -> List[dict]:
         code = normalize_code(postcode)
@@ -148,17 +165,22 @@ class PartitionedCandidateStore:
         if code in self._cache_cp:
             self._cache_cp.move_to_end(code)
             return self._cache_cp[code]
-        try:
-            table = self._dataset_cp.to_table(
-                filter=ds.field("postcode") == code,
-                columns=self._columns_cp,
-            )
-        except Exception:
-            return []
-        rows = self._coerce_candidate_types(table.to_pylist())
-        self._cache_cp[code] = rows
-        self._evict_lru(self._cache_cp, _MAX_STORE_CACHE_SIZE)
-        return rows
+
+        # O(1) Direct file read without traversing 30k folders
+        cp_folder = self.partitions_dir / "cp" / f"postcode={code}"
+        if cp_folder.is_dir():
+            try:
+                parquet_files = list(cp_folder.glob("*.parquet"))
+                if parquet_files:
+                    tables = [pq.read_table(f, columns=self._columns_cp) for f in parquet_files]
+                    table = pa.concat_tables(tables) if len(tables) > 1 else tables[0]
+                    rows = self._coerce_candidate_types(table.to_pylist())
+                    self._cache_cp[code] = rows
+                    self._evict_lru(self._cache_cp, _MAX_STORE_CACHE_SIZE)
+                    return rows
+            except Exception:
+                pass
+        return []
 
     def load_by_postcode_filtered_insee(self, postcode: Optional[str], insee: Optional[str]) -> List[dict]:
         code_cp = normalize_code(postcode)
@@ -169,18 +191,12 @@ class PartitionedCandidateStore:
         if cache_key in self._cache_cp_insee:
             self._cache_cp_insee.move_to_end(cache_key)
             return self._cache_cp_insee[cache_key]
-        try:
-            filt = (ds.field("postcode") == code_cp) & (ds.field("insee") == code_insee)
-            table = self._dataset_cp.to_table(
-                filter=filt,
-                columns=self._columns_cp,
-            )
-        except Exception:
-            return []
-        rows = self._coerce_candidate_types(table.to_pylist())
-        self._cache_cp_insee[cache_key] = rows
+
+        all_cp_rows = self.load_by_postcode(code_cp)
+        filtered = [r for r in all_cp_rows if normalize_code(r.get("insee")) == code_insee]
+        self._cache_cp_insee[cache_key] = filtered
         self._evict_lru(self._cache_cp_insee, _MAX_STORE_CACHE_SIZE)
-        return rows
+        return filtered
 
     def load_by_insee_then_postcode(
         self,
@@ -224,20 +240,22 @@ class PartitionedCandidateStore:
         code_cp = normalize_code(postcode)
         if not code_cp:
             return []
-        try:
-            table = self._dataset_cp.to_table(
-                filter=ds.field("postcode") == code_cp,
-                columns=["insee"] if "insee" in (self._columns_cp or []) else self._columns_cp,
-            )
-        except Exception:
-            return []
-        rows = table.to_pylist()
-        seen: dict = {}
-        for r in rows:
-            code = normalize_code(r.get("insee"))
-            if code:
-                seen[code] = None
-        return list(seen.keys())
+        cp_folder = self.partitions_dir / "cp" / f"postcode={code_cp}"
+        if cp_folder.is_dir():
+            try:
+                parquet_files = list(cp_folder.glob("*.parquet"))
+                if parquet_files:
+                    tables = [pq.read_table(f, columns=["insee"]) for f in parquet_files]
+                    table = pa.concat_tables(tables) if len(tables) > 1 else tables[0]
+                    seen: dict = {}
+                    for code in table.column("insee").to_pylist():
+                        norm = normalize_code(code)
+                        if norm:
+                            seen[norm] = None
+                    return list(seen.keys())
+            except Exception:
+                return []
+        return []
 
     def load_with_geo_resolution(
         self,

@@ -76,26 +76,49 @@ def _tokenize_name_for_idf(text: str | None) -> Set[str]:
     return {t for t in tokens if t and t not in NAME_STOPWORDS and len(t) >= 2}
 
 
-def compute_name_idf_map(candidates: Dict[str, dict]) -> Tuple[Dict[str, float], float]:
-    """Compute IDF map for candidate name tokens over the loaded pool."""
-    doc_freq: Dict[str, int] = defaultdict(int)
-    doc_count = 0
-    for cand in candidates.values():
-        name = primary_name(cand)
-        tokens = _tokenize_name_for_idf(name)
-        if not tokens:
-            continue
-        doc_count += 1
-        for tok in tokens:
-            doc_freq[tok] += 1
-    if doc_count == 0:
+def compute_name_idf_map(
+    candidates: Dict[str, dict],
+    *,
+    max_sample: int = 20_000,
+) -> Tuple[Dict[str, float], float]:
+    """Compute IDF map for candidate name tokens over the loaded pool.
+
+    Caps analysis to max_sample candidates (default 20,000) using deterministic
+    strided subsampling to prevent MemoryError on massive urban partitions (e.g. Paris,
+    Rennes, Marseille), while preserving statistically representative inverse document frequencies.
+    Includes fail-safe fallback to ({}, 0.0) in case of unexpected memory exhaustion.
+    """
+    if not candidates:
         return {}, 0.0
-    idf_map = {
-        tok: math.log((doc_count + 1) / (df + 1)) + 1.0
-        for tok, df in doc_freq.items()
-    }
-    default_idf = math.log((doc_count + 1) / 1) + 1.0
-    return idf_map, default_idf
+
+    try:
+        cand_values = list(candidates.values())
+        n_cands = len(cand_values)
+        if n_cands > max_sample:
+            # Deterministic strided subsampling across the entire distribution
+            step = max(1, n_cands // max_sample)
+            cand_values = cand_values[::step][:max_sample]
+
+        doc_freq: Dict[str, int] = defaultdict(int)
+        doc_count = 0
+        for cand in cand_values:
+            name = primary_name(cand)
+            tokens = _tokenize_name_for_idf(name)
+            if not tokens:
+                continue
+            doc_count += 1
+            for tok in tokens:
+                doc_freq[tok] += 1
+        if doc_count == 0:
+            return {}, 0.0
+        idf_map = {
+            tok: math.log((doc_count + 1) / (df + 1)) + 1.0
+            for tok, df in doc_freq.items()
+        }
+        default_idf = math.log((doc_count + 1) / 1) + 1.0
+        return idf_map, default_idf
+    except (MemoryError, Exception):
+        return {}, 0.0
 
 
 def _attach_address_density(

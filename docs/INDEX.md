@@ -23,6 +23,7 @@ graph TD
 Documentation décrivant les flux, principes et spécifications techniques du pipeline :
 * [`architecture_v0.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/architecture_v0.md) : Guide d'architecture baseline complet de bout en bout (Étapes 0 à 8, du pré-retrieval au post-decider fallback).
 * [`architecture/safe_batch_execution_standard.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/architecture/safe_batch_execution_standard.md) : **Standard Universel de Résilience des Batchs** (Checkpointing JSON atomique, reprise `--resume`, gestionnaire de veille `PowerMonitor` à 0% CPU).
+* [`architecture/store_and_cache_high_performance_standard.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/architecture/store_and_cache_high_performance_standard.md) : **Standard Haute Performance du Store & Caches** (Accès direct $O(1)$ aux partitions Parquet, cache RAM 300 communes, partage TF-IDF in-memory, IDF borné à 20k, mono-cœur sécurisé).
 * [`DECISIONS.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/DECISIONS.md) : Registre officiel des décisions d'architecture (SSOT, zéro data leakage, pivot V8b).
 * [`AGENTS.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/AGENTS.md) : Règles directrices, diagrammes Mermaid Pipe V6 et Pipe V7.
 

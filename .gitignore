@@ -21,6 +21,8 @@ output/
 logs/
 reports/
 .checkpoints/
-data/tfidf_cache/
 data/candidates_v7_all/
-
+data/candidates_v8_national/
+data/source_sirene_*/
+data/*.parquet
+data/tfidf_cache/

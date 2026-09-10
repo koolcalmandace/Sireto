@@ -260,7 +260,7 @@ def build_tfidf_index(
     )
     try:
         matrix = vectorizer.fit_transform(names)
-    except ValueError:
+    except (ValueError, MemoryError, Exception):
         return None, None, names
     return vectorizer, matrix, names
 
@@ -287,7 +287,7 @@ def build_address_tfidf_index(
     )
     try:
         matrix = vectorizer.fit_transform(addresses)
-    except ValueError:
+    except (ValueError, MemoryError, Exception):
         return None, None
     return vectorizer, matrix
 
@@ -299,30 +299,33 @@ def prefilter_candidates_address_tfidf(
     top_k: int,
 ) -> List[int]:
     """Return candidate indices for top-k TF-IDF similarity on address."""
-    if not crm_address or cand_matrix is None:
+    if not crm_address or cand_matrix is None or vectorizer is None or top_k <= 0:
         return []
     
     crm_norm = normalize_text_for_tfidf(crm_address)
     if not crm_norm:
         return []
         
-    q = vectorizer.transform([crm_norm])
-    sims = q @ cand_matrix.T
-    row = sims.getrow(0)
-    
-    if row.nnz == 0:
+    try:
+        q = vectorizer.transform([crm_norm])
+        sims = q @ cand_matrix.T
+        row = sims.getrow(0)
+        
+        if row.nnz == 0:
+            return []
+            
+        idx = row.indices
+        data = row.data
+        
+        if len(idx) > top_k:
+            sel = np.argpartition(data, -top_k)[-top_k:]
+            idx = idx[sel]
+            data = data[sel]
+            
+        order = np.argsort(data)[::-1]
+        return idx[order].tolist()
+    except (ValueError, MemoryError, Exception):
         return []
-        
-    idx = row.indices
-    data = row.data
-    
-    if len(idx) > top_k:
-        sel = np.argpartition(data, -top_k)[-top_k:]
-        idx = idx[sel]
-        data = data[sel]
-        
-    order = np.argsort(data)[::-1]
-    return idx[order].tolist()
 
 
 
@@ -342,29 +345,33 @@ def prefilter_candidates_tfidf(
     Uses word TF-IDF first, then char-ngram fallback for acronyms/typos.
     Combines both for improved recall on edge cases.
     """
-    if not crm_name or cand_matrix is None:
+    if not crm_name or top_k <= 0:
         return []
     crm_norm = normalize_text_for_tfidf(crm_name)
     if not crm_norm: # Handle empty normalized name
         return []
         
-    q = vectorizer.transform([crm_norm])
-    sims = q @ cand_matrix.T
-    row = sims.getrow(0)
-    
     # Collect word-based matches
     word_indices = set()
-    if row.nnz > 0:
-        idx = row.indices
-        data = row.data
-        # Take more candidates from word matching (1.5x top_k) for recall
-        word_limit = int(top_k * 1.5)
-        if len(idx) > word_limit:
-            sel = np.argpartition(data, -word_limit)[-word_limit:]
-            idx = idx[sel]
-            data = data[sel]
-        order = np.argsort(data)[::-1]
-        word_indices = set(idx[order].tolist())
+    if vectorizer is not None and cand_matrix is not None:
+        try:
+            q = vectorizer.transform([crm_norm])
+            sims = q @ cand_matrix.T
+            row = sims.getrow(0)
+            
+            if row.nnz > 0:
+                idx = row.indices
+                data = row.data
+                # Take more candidates from word matching (1.5x top_k) for recall
+                word_limit = max(1, int(top_k * 1.5))
+                if len(idx) > word_limit:
+                    sel = np.argpartition(data, -word_limit)[-word_limit:]
+                    idx = idx[sel]
+                    data = data[sel]
+                order = np.argsort(data)[::-1]
+                word_indices = set(idx[order].tolist())
+        except (ValueError, MemoryError, Exception):
+            pass
     
     # Always try char-ngram fallback for better recall (not just when word fails)
     char_indices = set()
@@ -391,7 +398,7 @@ def prefilter_candidates_tfidf(
                     c_data = c_data[sel]
                 c_order = np.argsort(c_data)[::-1]
                 char_indices = set(c_idx[c_order].tolist())
-        except ValueError:
+        except (ValueError, MemoryError, Exception):
             pass
     
     # Combine word and char indices (union), prioritize word matches
@@ -413,20 +420,29 @@ def prefilter_candidates_tfidf(
 
 def build_char_tfidf_index(
     cand_names: List[str],
+    *,
+    max_features: int = 50_000,
 ) -> Tuple[Optional[TfidfVectorizer], Optional[Any]]:
-    """Build char-ngram TF-IDF index for acronym/typo matching."""
+    """Build char-ngram TF-IDF index for acronym/typo matching with bounded vocabulary.
+    
+    Uses adaptive min_df (min_df=2 if >500 candidates) and max_features cap
+    to prevent memory explosion and C++ std::bad_alloc on large urban partitions.
+    """
     if not cand_names:
         return None, None
+    n_cands = len(cand_names)
+    min_df = 2 if n_cands > 500 else 1
     char_vec = TfidfVectorizer(
         analyzer="char_wb",
         ngram_range=(3, 5),
         lowercase=False,
-        min_df=1,
+        min_df=min_df,
+        max_features=max_features,
     )
     try:
         char_mat = char_vec.fit_transform(cand_names)
         return char_vec, char_mat
-    except ValueError:
+    except (ValueError, MemoryError, Exception):
         return None, None
 
 

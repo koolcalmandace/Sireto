@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import json
 import logging
 import sys
@@ -163,6 +164,7 @@ def evaluate(
 
     try:
         t_batch_start = time.perf_counter()
+        tfidf_cache: Dict = {}
 
         for idx, r in enumerate(rows):
             # Skip rows already processed in previous run
@@ -194,23 +196,43 @@ def evaluate(
             }
             crm_pre = preprocess_crm_row(crm_row)
 
-            tfidf_cache: Dict = {}
-            res = build_candidate_pool(
-                store=store,
-                crm_row=crm_row,
-                crm_pre=crm_pre,
-                config=config,
-                tfidf_cache=tfidf_cache,
-                gt_siret=gt_siret,
-                persistent_cache=cache,
-                timer=timer,
-                siren_to_geo=siren_to_geo,
-            )
+            # Cap in-memory TF-IDF cache to 300 entries max to prevent RAM saturation
+            if len(tfidf_cache) > 300:
+                tfidf_cache.pop(next(iter(tfidf_cache)))
 
-            gt_in_base = bool(res.gt_in_base_pool)
-            gt_in_filtered = bool(res.gt_in_filtered_pool)
-            gt_in_prefilter = bool(res.gt_in_tfidf_pool)
-            loss_reason = res.loss_reason or ("NOT_IN_BASE" if not gt_in_base else "")
+            try:
+                res = build_candidate_pool(
+                    store=store,
+                    crm_row=crm_row,
+                    crm_pre=crm_pre,
+                    config=config,
+                    tfidf_cache=tfidf_cache,
+                    gt_siret=gt_siret,
+                    persistent_cache=cache,
+                    timer=timer,
+                    siren_to_geo=siren_to_geo,
+                )
+
+                gt_in_base = bool(res.gt_in_base_pool)
+                gt_in_filtered = bool(res.gt_in_filtered_pool)
+                gt_in_prefilter = bool(res.gt_in_tfidf_pool)
+                loss_reason = res.loss_reason or ("NOT_IN_BASE" if not gt_in_base else "")
+                base_pool_sz = res.pool_sizes.get("base", 0)
+                filtered_pool_sz = res.pool_sizes.get("filtered", 0)
+                prefilter_pool_sz = len(res.candidates)
+            except Exception as e:
+                logger.error(
+                    "QUERY_ERROR at row %d (crm_id=%s, insee=%s, cp=%s): %s",
+                    idx, crm_id, crm_insee, crm_cp, e, exc_info=True,
+                )
+                gt_in_base = False
+                gt_in_filtered = False
+                gt_in_prefilter = False
+                loss_reason = "QUERY_ERROR"
+                base_pool_sz = 0
+                filtered_pool_sz = 0
+                prefilter_pool_sz = 0
+                gc.collect()
 
             detail_entry = {
                 "crm_id": crm_id,
@@ -220,9 +242,9 @@ def evaluate(
                 "gt_siret": gt_siret,
                 "loc_type": loc_type,
                 "sirene_etat": etat,
-                "base_pool_size": res.pool_sizes.get("base", 0),
-                "filtered_pool_size": res.pool_sizes.get("filtered", 0),
-                "prefilter_pool_size": len(res.candidates),
+                "base_pool_size": base_pool_sz,
+                "filtered_pool_size": filtered_pool_sz,
+                "prefilter_pool_size": prefilter_pool_sz,
                 "gt_in_base": gt_in_base,
                 "gt_in_filtered": gt_in_filtered,
                 "gt_in_prefilter": gt_in_prefilter,
@@ -242,6 +264,10 @@ def evaluate(
                 elapsed_delta=delta_t,
             )
 
+            # Periodic garbage collection at checkpoint boundaries
+            if ckpt.total_queries % checkpoint_interval == 0:
+                gc.collect()
+
             if ckpt.total_queries % 2000 == 0:
                 logger.info(
                     "Processed %d/%d (%.1f%%) — Base Recall: %.2f%%, Prefilter@%d: %.2f%%",
@@ -256,6 +282,7 @@ def evaluate(
             # Check if power monitor signaled sleep / lid close / lock
             if enable_power_monitor and power_mon.should_pause():
                 logger.info("[CHECKPOINT] Flushing state before entering safe pause...")
+                gc.collect()
                 ckpt.save(status="PAUSED", force=True)
                 power_mon.wait_for_resume()
                 logger.info("[CHECKPOINT] Resuming loop after safe sleep pause.")
