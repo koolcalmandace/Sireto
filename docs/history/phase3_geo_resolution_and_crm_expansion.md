@@ -41,3 +41,6 @@
 * `c754b97` : Résolution géo stricte dans `partitioned_store.py` et script de fusion CRM.
 * `fc4396b` : Unification de `build_candidate_pool` dans `retrieval.py` et script d'évaluation `evaluate_geo_resolution.py`.
 * `f1b4854` : Standard universel de résilience des batchs (`CheckpointManager`, `PowerMonitor` avec détection d'inactivité 5 minutes via `GetLastInputInfo`, pause 0% CPU sur verrouillage et reprise sans heurts).
+* `61bf67b` : Optimisations haute performance du store partitionné ($O(1)$ parquet direct, cache 300 communes, sous-échantillonnage IDF 20k, Char TF-IDF borné à 50k).
+* `<pending>` : Durcissement mémoire & résilience veille (clé canonique unifiée, élimination `names` de `tfidf_cache`, encapsulation `try/except` des compréhensions de listes dans `blocking.py`, éviction LRU stricte).
+

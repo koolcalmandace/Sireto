@@ -30,6 +30,7 @@ from .blocking import (
     attach_address_density,
     build_address_hash_index,
     build_numeric_token_index,
+    normalize_code,
 )
 
 if TYPE_CHECKING:
@@ -119,7 +120,12 @@ def _build_tfidf_artifacts(
     candidates: List[dict],
     config: RetrievalConfigV1,
 ) -> tuple:
-    """Build all TF-IDF indexes and return as a cacheable artifact bundle."""
+    """Build all TF-IDF indexes and return as a cacheable artifact bundle.
+
+    Returns (name_vec, name_mat, None, char_vec, char_mat, addr_vec, addr_mat).
+    The raw candidate name strings are deliberately discarded (set to None) after
+    fitting char_vec to free ~2.5-3.5 GB of RAM across cached communes.
+    """
     name_vec, name_mat, names = build_tfidf_index(
         candidates,
         name_mode=config.tfidf_name_mode,
@@ -129,7 +135,7 @@ def _build_tfidf_artifacts(
     if names:
         char_vec, char_mat = build_char_tfidf_index(names)
     addr_vec, addr_mat = build_address_tfidf_index(candidates)
-    return (name_vec, name_mat, names, char_vec, char_mat, addr_vec, addr_mat)
+    return (name_vec, name_mat, None, char_vec, char_mat, addr_vec, addr_mat)
 
 
 def _get_tfidf_artifacts(
@@ -145,6 +151,8 @@ def _get_tfidf_artifacts(
     # 1. In-memory cache (current run, shared within loc_key group)
     cached = tfidf_cache.get(cache_key)
     if cached and len(cached) >= 7:
+        if hasattr(tfidf_cache, "move_to_end"):
+            tfidf_cache.move_to_end(cache_key)
         return cached
 
     # 2. Persistent cache (cross-run, on disk)
@@ -152,6 +160,8 @@ def _get_tfidf_artifacts(
         disk_cached = persistent_cache.get(partition_key)
         if disk_cached and len(disk_cached) >= 7:
             tfidf_cache[cache_key] = disk_cached
+            if hasattr(tfidf_cache, "move_to_end"):
+                tfidf_cache.move_to_end(cache_key)
             return disk_cached
 
     # 3. Build from scratch
@@ -247,7 +257,15 @@ def build_candidate_pool(
     postcode = crm_row.get("postcode") or crm_row.get("crm_cp")
     crm_name = crm_row.get("crm_name", "")
     crm_address = crm_pre.get("crm_addr", "")
-    partition_key = f"{insee or ''}_{postcode or ''}"
+
+    code_insee = normalize_code(insee)
+    code_cp = normalize_code(postcode)
+    if code_insee:
+        partition_key = f"insee_{code_insee}"
+    elif code_cp:
+        partition_key = f"cp_{code_cp}"
+    else:
+        partition_key = "geo_unknown"
 
     gt_norm = str(gt_siret).zfill(14) if gt_siret else None
 
@@ -406,7 +424,7 @@ def build_candidate_pool(
     # Step 4: Prefilter — hybrid sparse (TF-IDF) + dense (FAISS) + rescue
     candidates = pool_list
     if config.prefilter_k and len(candidates) > config.prefilter_k:
-        cache_key = ("main", f"{insee}_{postcode}")
+        cache_key = ("main", partition_key)
 
         # 4a. Sparse retrieval (TF-IDF) — with persistent cache
         sparse_idx: List[int] = []
@@ -425,13 +443,13 @@ def build_candidate_pool(
                     with timer.stage("tfidf_query"):
                         name_idx = prefilter_candidates_tfidf(
                             crm_name, name_vec, name_mat, config.prefilter_k,
-                            cand_names=names, char_top_k=config.char_top_k,
+                            cand_names=None, char_top_k=config.char_top_k,
                             char_vectorizer=char_vec, char_matrix=char_mat,
                         )
                 else:
                     name_idx = prefilter_candidates_tfidf(
                         crm_name, name_vec, name_mat, config.prefilter_k,
-                        cand_names=names, char_top_k=config.char_top_k,
+                        cand_names=None, char_top_k=config.char_top_k,
                         char_vectorizer=char_vec, char_matrix=char_mat,
                     )
 

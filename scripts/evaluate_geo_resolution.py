@@ -30,7 +30,7 @@ import json
 import logging
 import sys
 import time
-from collections import Counter
+from collections import Counter, OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -164,7 +164,7 @@ def evaluate(
 
     try:
         t_batch_start = time.perf_counter()
-        tfidf_cache: Dict = {}
+        tfidf_cache: OrderedDict = OrderedDict()
 
         for idx, r in enumerate(rows):
             # Skip rows already processed in previous run
@@ -196,9 +196,9 @@ def evaluate(
             }
             crm_pre = preprocess_crm_row(crm_row)
 
-            # Cap in-memory TF-IDF cache to 300 entries max to prevent RAM saturation
-            if len(tfidf_cache) > 300:
-                tfidf_cache.pop(next(iter(tfidf_cache)))
+            # Cap in-memory TF-IDF cache to 300 entries max to prevent RAM saturation (LRU)
+            while len(tfidf_cache) > 300:
+                tfidf_cache.popitem(last=False)
 
             try:
                 res = build_candidate_pool(

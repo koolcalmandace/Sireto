@@ -239,30 +239,34 @@ def build_tfidf_index(
         siren_siblings: If True, enrich each candidate's names with SIREN siblings
                         (Variant C from training - recommended for best recall).
     """
-    # Build SIREN index if needed for sibling enrichment
-    siren_index = build_siren_index(candidates) if siren_siblings else None
-    
-    if name_mode == "primary":
-        names = [normalize_text_for_tfidf(primary_name(c) or "") for c in candidates]
-    elif siren_siblings:
-        names = [normalize_text_for_tfidf(_candidate_tfidf_name_with_siblings(c, siren_index)) for c in candidates]
-    else:
-        names = [normalize_text_for_tfidf(candidate_tfidf_text(c) or "") for c in candidates]
-    
-    # Align TF-IDF settings with training (generate_training_samples_v5fast.py)
-    vectorizer = TfidfVectorizer(  # type: ignore[arg-type]
-        analyzer="word",
-        ngram_range=(1, 2),
-        lowercase=False,
-        token_pattern=r"(?u)\b\w+\b",
-        min_df=1,
-        norm=None,  # type: ignore[arg-type]
-    )
+    names: List[str] = []
     try:
+        # Build SIREN index if needed for sibling enrichment
+        siren_index = build_siren_index(candidates) if siren_siblings else None
+        
+        if name_mode == "primary":
+            names = [normalize_text_for_tfidf(primary_name(c) or "") for c in candidates]
+        elif siren_siblings:
+            names = [normalize_text_for_tfidf(_candidate_tfidf_name_with_siblings(c, siren_index)) for c in candidates]
+        else:
+            names = [normalize_text_for_tfidf(candidate_tfidf_text(c) or "") for c in candidates]
+        
+        if not names or not any(names):
+            return None, None, names
+
+        # Align TF-IDF settings with training (generate_training_samples_v5fast.py)
+        vectorizer = TfidfVectorizer(  # type: ignore[arg-type]
+            analyzer="word",
+            ngram_range=(1, 2),
+            lowercase=False,
+            token_pattern=r"(?u)\b\w+\b",
+            min_df=1,
+            norm=None,  # type: ignore[arg-type]
+        )
         matrix = vectorizer.fit_transform(names)
+        return vectorizer, matrix, names
     except (ValueError, MemoryError, Exception):
         return None, None, names
-    return vectorizer, matrix, names
 
 
 
@@ -270,26 +274,26 @@ def build_address_tfidf_index(
     candidates: List[dict],
 ) -> Tuple[Optional[TfidfVectorizer], Optional[Any]]:
     """Build TF-IDF index for candidate addresses (Address First Retrieval)."""
-    addresses = [normalize_text_for_tfidf(build_address(c) or "") for c in candidates]
-    
-    # Check if we have any addresses
-    if not any(addresses):
-        return None, None
-
-    vectorizer = TfidfVectorizer(  # type: ignore[arg-type]
-        analyzer="word",
-        ngram_range=(1, 2), # Capture street names properly
-        lowercase=False,
-        token_pattern=r"(?u)\b\w+\b",
-        min_df=1,
-        max_df=0.95,
-        norm=None,  # type: ignore[arg-type]  # No length penalty for long addresses
-    )
     try:
+        addresses = [normalize_text_for_tfidf(build_address(c) or "") for c in candidates]
+        
+        # Check if we have any addresses
+        if not any(addresses):
+            return None, None
+
+        vectorizer = TfidfVectorizer(  # type: ignore[arg-type]
+            analyzer="word",
+            ngram_range=(1, 2), # Capture street names properly
+            lowercase=False,
+            token_pattern=r"(?u)\b\w+\b",
+            min_df=1,
+            max_df=0.95,
+            norm=None,  # type: ignore[arg-type]  # No length penalty for long addresses
+        )
         matrix = vectorizer.fit_transform(addresses)
+        return vectorizer, matrix
     except (ValueError, MemoryError, Exception):
         return None, None
-    return vectorizer, matrix
 
 
 def prefilter_candidates_address_tfidf(

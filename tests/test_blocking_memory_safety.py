@@ -85,3 +85,33 @@ def test_compute_name_idf_map_subsampling_and_safety():
     idf_map_sub, default_idf_sub = compute_name_idf_map(cands_large, max_sample=5_000)
     assert len(idf_map_sub) > 0
     assert default_idf_sub > 0.0
+
+
+def test_build_address_tfidf_index_memory_error_handled(monkeypatch):
+    """Verify build_address_tfidf_index handles MemoryError during address generation."""
+    def oom_build_address(cand):
+        raise MemoryError("Simulated address allocation OOM")
+
+    monkeypatch.setattr(blocking, "build_address", oom_build_address)
+    cands = [{"siret": "12345678900012", "numeroVoie": "10", "libelleVoie": "RUE DE PARIS"}]
+    vec, mat = blocking.build_address_tfidf_index(cands)
+    assert vec is None
+    assert mat is None
+
+
+def test_build_tfidf_artifacts_discards_raw_names():
+    """Verify _build_tfidf_artifacts returns None for raw names to free RAM."""
+    from src.xgb_matcher.retrieval import _build_tfidf_artifacts
+    from src.xgb_matcher.retrieval_config import RetrievalConfigV1
+
+    cands = [
+        {"denomination_ul": "ENTREPRISE ALFA", "siret": "11111111100011", "city": "PARIS"},
+        {"denomination_ul": "ENTREPRISE BETA", "siret": "22222222200022", "city": "PARIS"},
+    ]
+    cfg = RetrievalConfigV1()
+    name_vec, name_mat, names, char_vec, char_mat, addr_vec, addr_mat = _build_tfidf_artifacts(cands, cfg)
+    assert name_vec is not None
+    assert name_mat is not None
+    # Crucial memory optimization: names must be None to prevent 2.5-3.5 GB retention
+    assert names is None
+
