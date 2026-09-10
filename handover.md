@@ -35,7 +35,7 @@
 
 ---
 
-## ⚡ Optimisations Haute Performance du Store & Caches *(Septembre 2026)*
+## ⚡ Optimisations Haute Performance du Store & Caches *(Commit `61bf67b`)*
 - **Standard Officiel** : [`docs/architecture/store_and_cache_high_performance_standard.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/architecture/store_and_cache_high_performance_standard.md)
 - **Accès direct aux partitions Parquet $O(1)$** ([`partitioned_store.py`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/src/xgb_matcher/partitioned_store.py)) : Remplacement du scan récursif `pyarrow.dataset` par une lecture directe ciblée du fichier `insee=XXXXX/*.parquet` (< 2ms par commune) et résolution directe CP $\rightarrow$ INSEE sans scan.
 - **Cache RAM équilibré (300 communes)** : Capacité calibrée à 300 communes (plutôt que 1 000 ou 100) pour couvrir les agglomérations fréquentes sans saturer la RAM sur les métropoles géantes.
