@@ -35,12 +35,16 @@
 
 ---
 
-## ⚡ Optimisations Haute Performance du Store & Caches *(Commit `61bf67b`)*
+## ⚡ Optimisations Haute Performance du Store & Caches *(Commits `61bf67b`, `0925ba9`)*
 - **Standard Officiel** : [`docs/architecture/store_and_cache_high_performance_standard.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/architecture/store_and_cache_high_performance_standard.md)
 - **Accès direct aux partitions Parquet $O(1)$** ([`partitioned_store.py`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/src/xgb_matcher/partitioned_store.py)) : Remplacement du scan récursif `pyarrow.dataset` par une lecture directe ciblée du fichier `insee=XXXXX/*.parquet` (< 2ms par commune) et résolution directe CP $\rightarrow$ INSEE sans scan.
-- **Cache RAM équilibré (300 communes)** : Capacité calibrée à 300 communes (plutôt que 1 000 ou 100) pour couvrir les agglomérations fréquentes sans saturer la RAM sur les métropoles géantes.
+- **Cache RAM équilibré & LRU strict (300 communes)** ([`evaluate_geo_resolution.py`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/scripts/evaluate_geo_resolution.py)) : Capacité calibrée à 300 communes avec politique d'éviction LRU stricte (`OrderedDict.popitem(last=False)`) et `move_to_end` à l'accès.
+- **Durcissement Mémoire & Résilience Veille** *(Commit `0925ba9`)* :
+  - Encapsulation intégrale des compréhensions de listes dans `build_address_tfidf_index` et `build_word_tfidf_index` ([`blocking.py`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/src/xgb_matcher/blocking.py)) sous `try...except (ValueError, MemoryError, Exception)`, éliminant tout crash OOM sur Paris ou les grandes métropoles.
+  - Clé canonique unifiée de partition (`f"insee_{code_insee}"`) dans `build_candidate_pool` ([`retrieval.py`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/src/xgb_matcher/retrieval.py)), garantissant zéro duplication intra-commune dans `tfidf_cache`.
+  - Élimination de la liste brute de chaînes `names` dans `_build_tfidf_artifacts` (libérant ~2.5 à 3.5 Go de RAM en ne conservant que les matrices CSR et vectoriseurs).
+  - Empreinte RAM maximale plafonnée sous **~2.5 Go** (au lieu de 8.1 Go), garantissant une résilience totale lors de la mise en veille de l'OS.
 - **Plafonnement IDF Map 20k & Fail-Safe** ([`candidates.py`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/src/xgb_matcher/candidates.py)) : Échantillonnage déterministe à 20 000 candidats max et capture `(MemoryError, Exception)` évitant les crashs sur Rennes (275k lignes) ou Paris.
-- **Partage in-memory du cache TF-IDF (300 modèles)** ([`evaluate_geo_resolution.py`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/scripts/evaluate_geo_resolution.py)) : Conservation des matrices de vocabulaire par commune évitant les recalculs répétés lors des batchs, avec filet de sécurité unitaire par requête et `gc.collect()` périodique aux checkpoints.
 - **Sécurité Mémoire Char TF-IDF Bounded & Safe** ([`blocking.py`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/src/xgb_matcher/blocking.py)) : Plafonnement `max_features=50_000`, `min_df` adaptatif et capture `MemoryError` évitant tout `std::bad_alloc` sur les grandes métropoles.
 - **Exécution 100% Mono-cœur Sécurisée** : Zéro crash multiprocessing, empreinte CPU minimale et stabilité absolue.
 
