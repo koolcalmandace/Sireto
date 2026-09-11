@@ -82,6 +82,7 @@ def evaluate(
     resume: bool = True,
     fresh: bool = False,
     checkpoint_interval: int = 100,
+    cache_size: int = 150,
     enable_power_monitor: bool = True,
     pause_on_lock: bool = True,
     idle_timeout_seconds: float = 300.0,
@@ -95,7 +96,7 @@ def evaluate(
         fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
         logger.addHandler(fh)
 
-    store = PartitionedCandidateStore(partitions_dir)
+    store = PartitionedCandidateStore(partitions_dir, max_cache_size=cache_size)
     config = RetrievalConfigV1(
         prefilter_k=prefilter_k,
         dense_retrieval_enabled=False,
@@ -196,8 +197,8 @@ def evaluate(
             }
             crm_pre = preprocess_crm_row(crm_row)
 
-            # Cap in-memory TF-IDF cache to 300 entries max to prevent RAM saturation (LRU)
-            while len(tfidf_cache) > 300:
+            # Cap in-memory TF-IDF cache to cache_size entries max to prevent RAM saturation (LRU)
+            while len(tfidf_cache) > cache_size:
                 tfidf_cache.popitem(last=False)
 
             try:
@@ -444,6 +445,12 @@ def main() -> None:
         default=300.0,
         help="Inactivity timeout in seconds before pausing computation (Default: 300.0 = 5 min, 0 to disable)",
     )
+    parser.add_argument(
+        "--cache-size",
+        type=int,
+        default=150,
+        help="Max cached communes in RAM for store and TF-IDF (Default: 150)",
+    )
 
     args = parser.parse_args()
 
@@ -468,6 +475,7 @@ def main() -> None:
         resume=args.resume,
         fresh=args.fresh,
         checkpoint_interval=args.checkpoint_interval,
+        cache_size=args.cache_size,
         enable_power_monitor=args.enable_power_monitor,
         pause_on_lock=args.pause_on_lock,
         idle_timeout_seconds=args.idle_timeout,

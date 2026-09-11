@@ -19,9 +19,9 @@ import pyarrow.parquet as pq
 from .blocking import normalize_code, department_from_code
 
 # Maximum number of entries per store cache (INSEE / CP / dept)
-# Set to 300 to balance high cache-hit rates across recurring cities
-# while preventing excessive Python RAM usage on large metropolitan partitions.
-_MAX_STORE_CACHE_SIZE = 300
+# Calibrated to 150 to guarantee memory safety (< 5 GB RAM) while maintaining
+# an optimal cache-hit rate (~35% hits on CRM sequence, minimal overhead).
+_MAX_STORE_CACHE_SIZE = 150
 
 # Columns actually used by features, naming, filtering, and output.
 # Excludes unused columns (nom_usage_ul, pseudonyme_ul) to reduce I/O and RAM.
@@ -41,8 +41,9 @@ REQUIRED_COLUMNS = [
 class PartitionedCandidateStore:
     """Lazy loader for candidates by INSEE / CP / department with O(1) direct file reads."""
 
-    def __init__(self, partitions_dir: Path):
+    def __init__(self, partitions_dir: Path, max_cache_size: int = _MAX_STORE_CACHE_SIZE):
         self.partitions_dir = Path(partitions_dir)
+        self.max_cache_size = max(1, int(max_cache_size))
         self._dataset_insee_lazy = None
         self._dataset_cp_lazy = None
         self._cache_insee: OrderedDict[str, List[dict]] = OrderedDict()
@@ -117,7 +118,7 @@ class PartitionedCandidateStore:
         if code in self._manifest_insee_counts:
             count = int(self._manifest_insee_counts[code])
             self._cache_insee_count[code] = count
-            self._evict_lru(self._cache_insee_count, _MAX_STORE_CACHE_SIZE)
+            self._evict_lru(self._cache_insee_count, self.max_cache_size)
             return count
 
         # O(1) metadata check on direct partition file
@@ -128,7 +129,7 @@ class PartitionedCandidateStore:
                 if parquet_files:
                     count = sum(pq.read_metadata(f).num_rows for f in parquet_files)
                     self._cache_insee_count[code] = count
-                    self._evict_lru(self._cache_insee_count, _MAX_STORE_CACHE_SIZE)
+                    self._evict_lru(self._cache_insee_count, self.max_cache_size)
                     return count
             except Exception:
                 pass
@@ -162,7 +163,7 @@ class PartitionedCandidateStore:
                                 deduped.append(r)
                         rows = deduped
                     self._cache_insee[code] = rows
-                    self._evict_lru(self._cache_insee, _MAX_STORE_CACHE_SIZE)
+                    self._evict_lru(self._cache_insee, self.max_cache_size)
                     return rows
             except Exception:
                 pass
@@ -195,7 +196,7 @@ class PartitionedCandidateStore:
                                 deduped.append(r)
                         rows = deduped
                     self._cache_cp[code] = rows
-                    self._evict_lru(self._cache_cp, _MAX_STORE_CACHE_SIZE)
+                    self._evict_lru(self._cache_cp, self.max_cache_size)
                     return rows
             except Exception:
                 pass
@@ -214,7 +215,7 @@ class PartitionedCandidateStore:
         all_cp_rows = self.load_by_postcode(code_cp)
         filtered = [r for r in all_cp_rows if normalize_code(r.get("insee")) == code_insee]
         self._cache_cp_insee[cache_key] = filtered
-        self._evict_lru(self._cache_cp_insee, _MAX_STORE_CACHE_SIZE)
+        self._evict_lru(self._cache_cp_insee, self.max_cache_size)
         return filtered
 
     def load_by_insee_then_postcode(

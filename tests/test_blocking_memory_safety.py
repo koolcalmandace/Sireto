@@ -115,3 +115,22 @@ def test_build_tfidf_artifacts_discards_raw_names():
     # Crucial memory optimization: names must be None to prevent 2.5-3.5 GB retention
     assert names is None
 
+
+def test_partitioned_store_default_cache_limit(tmp_path):
+    """Verify PartitionedCandidateStore defaults to 150 and evicts properly."""
+    from src.xgb_matcher.partitioned_store import PartitionedCandidateStore, _MAX_STORE_CACHE_SIZE
+
+    assert _MAX_STORE_CACHE_SIZE == 150
+    store = PartitionedCandidateStore(tmp_path)
+    assert store.max_cache_size == 150
+
+    # Custom capacity support
+    custom_store = PartitionedCandidateStore(tmp_path, max_cache_size=5)
+    assert custom_store.max_cache_size == 5
+    for i in range(10):
+        custom_store._cache_insee[f"city_{i}"] = [{"siret": f"{i}"}]
+        custom_store._evict_lru(custom_store._cache_insee, custom_store.max_cache_size)
+    assert len(custom_store._cache_insee) == 5
+    assert list(custom_store._cache_insee.keys()) == ["city_5", "city_6", "city_7", "city_8", "city_9"]
+
+

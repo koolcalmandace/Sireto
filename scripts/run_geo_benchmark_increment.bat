@@ -28,6 +28,7 @@ echo ============================================================
     --output-dir reports\geo_validation ^
     --tag 15k_increment ^
     --prefilter-k 500 ^
+    --cache-size 150 ^
     --log-file %LOG_DIR%\run_geo_benchmark_increment.log
 
 IF ERRORLEVEL 1 (

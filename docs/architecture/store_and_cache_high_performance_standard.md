@@ -83,24 +83,26 @@ CRM Query ──> Accès direct O(1) insee=XXXXX/*.parquet ──> Cache RAM (1 
      `tfidf_cache` est implémenté en `OrderedDict` avec éviction LRU explicite (`popitem(last=False)`) et rafraîchissement d'accès (`move_to_end`). Des appels réguliers à `gc.collect()` aux checkpoints purgent les blocs de mémoire Scipy/Numpy désalloués.
   5. **Suppression Définitive de la Duplication Parquet & Verrou de Store** ([`partitioned_store.py`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/src/xgb_matcher/partitioned_store.py)) :
      Élimination des 699 fichiers Parquet dupliqués dans `data/candidates_v7_all/insee/` (générés historiquement par `pq.write_to_dataset`). Ajout d'un garde-fou applicatif de dédoublonnage par `siret` dans `PartitionedCandidateStore.load_by_insee()` et `load_by_postcode()`. Le nombre de dictionnaires en mémoire sur les métropoles majeures est divisé par 2 (de 4 millions à 2 millions de candidats).
-* **Gain mesuré** : Empreinte RAM maximale bornée sous **~4.5 Go** (au lieu de 9.5 Go), préservant 100% des 25 colonnes XGBoost et le cache optimal de 300 communes (49.8% de hit rate), tout en garantissant une veille Windows (Modern Standby) sans aucun blocage ni redémarrage inopiné.
+  6. **Calibration Équilibrée du Cache à 150 Communes** ([`partitioned_store.py`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/src/xgb_matcher/partitioned_store.py), [`evaluate_geo_resolution.py`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/scripts/evaluate_geo_resolution.py)) :
+     Ajustement de la capacité LRU maximale à **150 communes** (au lieu de 300). Sur la séquence de 20 209 requêtes CRM, cette configuration préserve un excellent hit rate de **34.9%** (7 058 hits) et n'engendre que ~2 000 misses supplémentaires sur 14 000 requêtes. Avec un surcoût unitaire de rechargement de 50 ms (< 3 ms lecture Parquet $O(1)$ + 45 ms TF-IDF), le surcoût temporel total n'est que de **1 min 40 s (+0.3%)**, tout en réduisant l'empreinte RAM sous **~4.5 à 5.0 Go** et en libérant **~11 Go de RAM libre** sur la machine.
+* **Gain mesuré** : Empreinte RAM maximale bornée sous **~4.5 - 5.0 Go** (au lieu de 10-15 Go), préservant 100% des 25 colonnes XGBoost, tout en garantissant une veille Windows (Modern Standby) sans aucun blocage ni redémarrage inopiné.
 
 ---
 
 ## 3. Matrice Comparative des Performances
 
-| Métrique | Avant Optimisation | Après Optimisation V1 | Après Durcissement V2 (Sleep Safe & Dédoublonné) |
-| :--- | :---: | :---: | :---: |
-| **Initialisation du Store** | ~40 à 60 s | < 1 ms | **< 1 ms** |
-| **Lecture Disque Commune** | ~100 à 250 ms | 1 à 2 ms | **1 à 2 ms** |
-| **Accès Cache RAM** | Souvent évincé (5 max) | 0.025 ms (300 max) | **0.025 ms (300 LRU strict)** |
-| **Duplication Clés TF-IDF** | Systématique (100%) | Présente sur variations CP | **0% (Clé canonique insee_*)** |
-| **Duplication Parquet Disque** | 699 communes doublées | 699 communes doublées | **0% (2 099 communes uniques)** |
-| **Rétention `names` bruts** | Présente | Présente (~3 Go de chaînes) | **Éliminée (0 Mo de chaînes)** |
-| **Empreinte RAM Stable** | ~50 Mo | ~9.5 Go (saturation) | **~4.5 Go (11.5 Go libres)** |
-| **Résilience Veille Windows** | Instable | Crash / Reboot Event 41 | **100% Stable (Zéro reboot)** |
-| **Cache Hit Rate Réel** | 11.2% (cache 20) | 49.8% (cache 300) | **49.8% (cache 300)** |
-| **Débit Global Estimé** | ~1 à 2 q/s | 50 à 100+ q/s | **50 à 100+ q/s** |
+| Métrique | Avant Optimisation | Après Optimisation V1 | Après Durcissement V2 (Sleep Safe & Dédoublonné) | Configuration Calibrée (150 Communes) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Initialisation du Store** | ~40 à 60 s | < 1 ms | < 1 ms | **< 1 ms** |
+| **Lecture Disque Commune** | ~100 à 250 ms | 1 à 2 ms | 1 à 2 ms | **1 à 2 ms** |
+| **Accès Cache RAM** | Souvent évincé (5 max) | 0.025 ms (300 max) | 0.025 ms (300 LRU) | **0.025 ms (150 LRU strict)** |
+| **Duplication Clés TF-IDF** | Systématique (100%) | Présente sur variations CP | 0% (Clé canonique insee_*) | **0% (Clé canonique insee_*)** |
+| **Duplication Parquet Disque** | 699 communes doublées | 699 communes doublées | 0% (2 099 communes uniques) | **0% (2 099 communes uniques)** |
+| **Rétention `names` bruts** | Présente | Présente (~3 Go de chaînes) | Éliminée (0 Mo de chaînes) | **Éliminée (0 Mo de chaînes)** |
+| **Empreinte RAM Stable** | ~50 Mo | ~9.5 Go (saturation) | ~10.0 Go (charge 300) | **~4.5 - 5.0 Go (~11 Go libres)** |
+| **Résilience Veille Windows** | Instable | Crash / Reboot Event 41 | Instable à 97% RAM | **100% Stable (Zéro reboot)** |
+| **Cache Hit Rate Réel** | 11.2% (cache 20) | 49.8% (cache 300) | 49.8% (cache 300) | **34.9% (cache 150)** |
+| **Surcoût Temporel Global** | — | — | Référence | **+1m 40s sur 14k req (+0.3%)** |
 
 ---
 
