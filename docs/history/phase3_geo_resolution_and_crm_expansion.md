@@ -43,5 +43,7 @@
 * `f1b4854` : Standard universel de résilience des batchs (`CheckpointManager`, `PowerMonitor` avec détection d'inactivité 5 minutes via `GetLastInputInfo`, pause 0% CPU sur verrouillage et reprise sans heurts).
 * `61bf67b` : Optimisations haute performance du store partitionné ($O(1)$ parquet direct, cache 300 communes, sous-échantillonnage IDF 20k, Char TF-IDF borné à 50k).
 * `0925ba9` : Durcissement mémoire & résilience veille (clé canonique unifiée, élimination `names` de `tfidf_cache`, encapsulation `try/except` des compréhensions de listes dans `blocking.py`, éviction LRU stricte).
+* `effffbc` : Élimination définitive des 699 partitions Parquet dupliquées sur disque et ajout d'un garde-fou de dédoublonnage par SIRET dans `PartitionedCandidateStore`.
+
 
 
