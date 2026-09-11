@@ -151,6 +151,16 @@ class PartitionedCandidateStore:
                     tables = [pq.read_table(f, columns=self._columns_insee) for f in parquet_files]
                     table = pa.concat_tables(tables) if len(tables) > 1 else tables[0]
                     rows = self._coerce_candidate_types(table.to_pylist())
+                    # Defensive guard: deduplicate SIRETs if multiple partitions were concatenated
+                    if len(tables) > 1:
+                        seen: set = set()
+                        deduped = []
+                        for r in rows:
+                            s = r.get("siret")
+                            if s not in seen:
+                                seen.add(s)
+                                deduped.append(r)
+                        rows = deduped
                     self._cache_insee[code] = rows
                     self._evict_lru(self._cache_insee, _MAX_STORE_CACHE_SIZE)
                     return rows
@@ -175,6 +185,15 @@ class PartitionedCandidateStore:
                     tables = [pq.read_table(f, columns=self._columns_cp) for f in parquet_files]
                     table = pa.concat_tables(tables) if len(tables) > 1 else tables[0]
                     rows = self._coerce_candidate_types(table.to_pylist())
+                    if len(tables) > 1:
+                        seen: set = set()
+                        deduped = []
+                        for r in rows:
+                            s = r.get("siret")
+                            if s not in seen:
+                                seen.add(s)
+                                deduped.append(r)
+                        rows = deduped
                     self._cache_cp[code] = rows
                     self._evict_lru(self._cache_cp, _MAX_STORE_CACHE_SIZE)
                     return rows
