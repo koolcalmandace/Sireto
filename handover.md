@@ -35,14 +35,16 @@
 
 ---
 
-## ⚡ Optimisations Haute Performance du Store & Caches *(Commits `61bf67b`, `0925ba9`, `effffbc`)*
+## ⚡ Optimisations Haute Performance du Store & Caches *(Commits `61bf67b`, `0925ba9`, `effffbc`, `41ada61`)*
 - **Standard Officiel** : [`docs/architecture/store_and_cache_high_performance_standard.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/architecture/store_and_cache_high_performance_standard.md)
 - **Accès direct aux partitions Parquet $O(1)$** ([`partitioned_store.py`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/src/xgb_matcher/partitioned_store.py)) : Remplacement du scan récursif `pyarrow.dataset` par une lecture directe ciblée du fichier `insee=XXXXX/*.parquet` (< 2ms par commune) et résolution directe CP $\rightarrow$ INSEE sans scan.
 - **Suppression Définitive de la Duplication Parquet & Verrou de Store** *(Commit `effffbc`)* :
   - Élimination des 699 fichiers Parquet dupliqués dans `data/candidates_v7_all/insee/` (générés historiquement par PyArrow `write_to_dataset`).
   - Ajout d'un garde-fou applicatif de dédoublonnage par `siret` dans `load_by_insee()` et `load_by_postcode()`.
-  - Nombre de candidats en mémoire divisé par 2 (de 4M à 2M de dictionnaires sur les métropoles), bornant la RAM active sous **~4.5 Go** avec les 300 communes en cache (hit rate optimal de 49.8%).
-- **Cache RAM équilibré & LRU strict (300 communes)** ([`evaluate_geo_resolution.py`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/scripts/evaluate_geo_resolution.py)) : Capacité calibrée à 300 communes avec politique d'éviction LRU stricte (`OrderedDict.popitem(last=False)`) et `move_to_end` à l'accès.
+  - Nombre de candidats en mémoire divisé par 2 (de 4M à 2M de dictionnaires sur les métropoles).
+- **Calibration Équilibrée du Cache LRU (150 communes)** *(Commit `41ada61`)* :
+  - Capacité du store et du TF-IDF calibrée à 150 communes (`--cache-size 150`), divisant par 2 la charge mémoire active sous **~4.5 à 5.0 Go** (laissant ~11 Go de RAM libre).
+  - Préservation d'un hit rate solide de 34.9% avec un surcoût temporel global négligeable de **1 min 40 s** sur 14 000 requêtes (+0.3%).
 - **Durcissement Mémoire & Résilience Veille** *(Commit `0925ba9`)* :
   - Encapsulation intégrale des compréhensions de listes dans `build_address_tfidf_index` et `build_word_tfidf_index` ([`blocking.py`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/src/xgb_matcher/blocking.py)) sous `try...except (ValueError, MemoryError, Exception)`, éliminant tout crash OOM sur Paris ou les grandes métropoles.
   - Clé canonique unifiée de partition (`f"insee_{code_insee}"`) dans `build_candidate_pool` ([`retrieval.py`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/src/xgb_matcher/retrieval.py)), garantissant zéro duplication intra-commune dans `tfidf_cache`.

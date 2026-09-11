@@ -44,6 +44,8 @@
 * `61bf67b` : Optimisations haute performance du store partitionné ($O(1)$ parquet direct, cache 300 communes, sous-échantillonnage IDF 20k, Char TF-IDF borné à 50k).
 * `0925ba9` : Durcissement mémoire & résilience veille (clé canonique unifiée, élimination `names` de `tfidf_cache`, encapsulation `try/except` des compréhensions de listes dans `blocking.py`, éviction LRU stricte).
 * `effffbc` : Élimination définitive des 699 partitions Parquet dupliquées sur disque et ajout d'un garde-fou de dédoublonnage par SIRET dans `PartitionedCandidateStore`.
+* `41ada61` : Recalibrage du cache communes à 150 entrées dans `PartitionedCandidateStore` et `evaluate_geo_resolution.py` (RAM bornée sous ~5 Go, +1m40s sur 14k req).
+
 
 
 
