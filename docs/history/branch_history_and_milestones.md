@@ -60,7 +60,8 @@ timeline
 | Nom de Branche | Base | Rôle / Objectif | Statut |
 | :--- | :--- | :--- | :---: |
 | `main` | - | Branche stable de production (V7 baseline). | Active / Protégée |
-| `feature/geo-resolution-and-crm-expansion` | `main` | Implémentation résolution géo stricte, audit/fusion CRM 32k, et déploiement V8b. | **Active (Courante)** |
+| `feature/geo-resolution-and-crm-expansion` | `main` | Implémentation résolution géo stricte, benchmarks 17k/15k, résilience batch et fusion CRM 32 570. | **Validée (Étapes 1-4)** |
+| `feature/v8-national-partitions-and-retrieval` | `feature/geo-resolution-and-crm-expansion` | Intégration Store National V8, expansion sectorielle publique vectorielle et repêchage densité. | **Active (Courante)** |
 | `archive/pipe-v6-llm` | - | Sauvegarde de l'ancienne version avec LLMs. | Archivée |
 
 ---
@@ -69,6 +70,8 @@ timeline
 
 | Date | Commit | Auteur | Description & Impact |
 | :--- | :---: | :---: | :--- |
+| **2026-09-17** | `c77793b` | Antigravity | Intégration Store V8 National ($O(1)$ probe, fallback Hive) + règles retrieval (public vector expansion, density guard $\le 5$). |
+| **2026-09-17** | `61dfa1e` | Antigravity | Standard exécution batch sécurisée (PowerGuard, MemoryGovernor, Checkpoints) + fusion CRM 32k. |
 | **2026-08-21** | `cd2c3b3` | Antigravity | Scripts batch robustes avec auto-résolution du répertoire racine et logs natifs. |
 | **2026-08-21** | `fc4396b` | Antigravity | Branchement de `load_with_geo_resolution` dans `retrieval.py` et création de `evaluate_geo_resolution.py`. |
 | **2026-08-20** | `c754b97` | Antigravity | Chantier 1 (Geo resolution) + Chantier 2a/2b (Audit incrément CRM + script merge). |

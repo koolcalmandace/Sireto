@@ -1,7 +1,7 @@
-# SIRETO Active Handover Cockpit — 7 Septembre 2026
+# SIRETO Active Handover Cockpit — 17 Septembre 2026
 
-**Branche active** : `feature/geo-resolution-and-crm-expansion` (issue de `main`)  
-**Phase courante** : [Phase 3 : Résolution Géo Stricte & Expansion CRM 32k](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/history/phase3_geo_resolution_and_crm_expansion.md)  
+**Branche active** : `feature/v8-national-partitions-and-retrieval` (issue de `feature/geo-resolution-and-crm-expansion`)  
+**Phase courante** : [Phase 3 : Intégration V8 National & Règles de Retrieval](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/history/phase3_geo_resolution_and_crm_expansion.md)  
 **Cartographie documentaire complète** : [docs/INDEX.md](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/INDEX.md)
 
 ---
@@ -14,8 +14,9 @@
 | **Étape 2** | **Validation Empirique 17k Baseline** (Zéro Régression) | ✅ **Validée** | [`geo_benchmark_17k_baseline_summary.json`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/reports/geo_validation/geo_benchmark_17k_baseline_summary.json), [`analysis_step2_*.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/analysis/analysis_step2_geo_benchmark_17k_baseline.md) |
 | **Étape 3** | **Validation Empirique Incrément 15 516** | ✅ **Validée (100% / 20 209 requêtes)** | [`geo_benchmark_15k_increment_summary.json`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/reports/geo_validation/geo_benchmark_15k_increment_summary.json), [`analysis_step3_*.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/analysis/analysis_step3_geo_benchmark_15k_increment.md), [`analysis_step3_pruned_cases_breakdown.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/analysis/analysis_step3_pruned_cases_breakdown.md) *(commit `61dfa1e`)* |
 | **Étape 4** | **Fusion Contrôlée des Datasets (32 570)** | ✅ **Validée (32 570 requêtes)** | [`merge_crm_increment.py`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/scripts/merge_crm_increment.py), [`data/crm_ok_gt_merged_v1.csv`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/data/crm_ok_gt_merged_v1.csv) *(commit `61dfa1e`)* |
-| **Étape 5** | **Génération Store SIRENE National V8 (France Entière)** | ✅ **Terminée (29 219 communes)** | [`build_candidate_partitions_national.py`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/scripts/build_candidate_partitions_national.py) $\rightarrow$ `data/candidates_v8_national/` |
+| **Étape 5** | **Store National V8 & Nouvelles Règles de Retrieval** | 🔄 **En cours d'évaluation (5 502 cas)** | [`partitioned_store.py`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/src/xgb_matcher/partitioned_store.py), [`retrieval.py`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/src/xgb_matcher/retrieval.py), [`retrieval_config.py`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/src/xgb_matcher/retrieval_config.py) *(commit `c77793b`)* |
 | **Étape 6** | **Réentraînement XGBoost v2 (Ranker, Decider, Risk)** | ⏳ **Feuille de route cadrée** | Voir décisions clés ci-dessous |
+
 
 ---
 
