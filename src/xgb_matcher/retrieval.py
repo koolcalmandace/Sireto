@@ -113,6 +113,57 @@ def _stable_seed(value: str) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Semantic vector prototypes for public sector / municipal classification
+# ---------------------------------------------------------------------------
+
+_PUBLIC_SECTOR_PROTOTYPES = [
+    "ecole elementaire primaire maternelle college lycee groupe scolaire enseignement classe",
+    "mairie commune hotel de ville services techniques batiment municipal municipale collectivite communale intercommunale",
+    "gymnase stade piscine municipale complexe sportif salle des fetes dojo terrain sports gymnases",
+    "espace culturel mediatheque bibliotheque centre social ccas cias maison de quartier action sociale communal communale",
+    "halte garderie creche centre aere loisirs enfance jeunesse cantine scolaire periscolaire",
+    "police municipale centre de secours pompiers collectivite territoriale sdis hopital centre hospitalier ch ehpad",
+]
+_PUBLIC_VECTORIZER = None
+_PUBLIC_PROTO_MAT = None
+
+
+_PRIVATE_BUSINESS_TERMS = {
+    "sarl", "sas", "eurl", "snc", "sci", "sa", "garage", "boulangerie", "boucherie",
+    "restaurant", "hotel", "coiffure", "bar", "brasserie", "cafe", "boutique",
+    "salon", "auto", "imprimerie", "carrosserie", "optique", "pharmacie", "press",
+    "pressing", "commercial", "societe", "entreprise", "holding", "cabinet"
+}
+
+
+def _is_public_sector_query(text: str) -> bool:
+    """Classify via semantic vector prototype if query relates to public/municipal services."""
+    global _PUBLIC_VECTORIZER, _PUBLIC_PROTO_MAT
+    if not text:
+        return False
+
+    # Normalize punctuation into whitespace for token checks
+    clean_text = "".join(ch if ch.isalnum() else " " for ch in text.lower())
+    tokens = set(clean_text.split())
+    if tokens & _PRIVATE_BUSINESS_TERMS:
+        return False
+
+    if _PUBLIC_VECTORIZER is None:
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        stopwords = ["de", "du", "des", "la", "le", "les", "et", "en", "un", "une", "d", "l", "au", "aux"]
+        _PUBLIC_VECTORIZER = TfidfVectorizer(ngram_range=(1, 2), analyzer="word", stop_words=stopwords)
+        _PUBLIC_PROTO_MAT = _PUBLIC_VECTORIZER.fit_transform(_PUBLIC_SECTOR_PROTOTYPES)
+    from sklearn.metrics.pairwise import cosine_similarity
+    try:
+        q_vec = _PUBLIC_VECTORIZER.transform([clean_text])
+        sims = cosine_similarity(q_vec, _PUBLIC_PROTO_MAT)[0]
+        return float(max(sims)) >= 0.15
+    except Exception:
+        return False
+
+
+
+# ---------------------------------------------------------------------------
 # TF-IDF artifact building (extracted for caching)
 # ---------------------------------------------------------------------------
 
@@ -241,6 +292,7 @@ def build_candidate_pool(
     timer: Optional["PipelineTimer"] = None,
     siren_global_index: Optional[Any] = None,
     siren_to_geo: Optional[Any] = None,
+    compute_idf_map: bool = True,
 ) -> CandidatePoolResult:
     """Build candidate pool with unified code-path for train and inference.
 
@@ -326,13 +378,16 @@ def build_candidate_pool(
                         seen_sirets.add(str(cand.get("siret") or ""))
                         loaded_for_siren += 1
 
-        # Phase 3: Compute IDF map
-        candidates_dict = {
-            str(c.get("siret") or ""): c
-            for c in candidates
-            if c.get("siret")
-        }
-        idf_map, default_idf = compute_name_idf_map(candidates_dict)
+        # Phase 3: Compute IDF map (optional for recall evaluation)
+        if compute_idf_map:
+            candidates_dict = {
+                str(c.get("siret") or ""): c
+                for c in candidates
+                if c.get("siret")
+            }
+            idf_map, default_idf = compute_name_idf_map(candidates_dict)
+            result.idf_map = idf_map
+            result.default_idf = float(default_idf)
 
         result.pool_sizes["base"] = len(candidates)
         result.pool_sizes["filtered"] = len(candidates)
@@ -379,13 +434,14 @@ def build_candidate_pool(
     pool_list = list(pool.values())
 
     result.pool_sizes["filtered"] = len(pool_list)
-    result.gt_in_filtered_pool = gt_norm in _get_siret_set(pool_list) if gt_norm else False
+    result.gt_in_filtered_pool = _check_siret_in_list(pool_list, gt_norm)
 
-    candidates_dict = {str(c.get("siret") or ""): c for c in pool_list if c.get("siret")}
-    if candidates_dict:
-        idf_map, default_idf = compute_name_idf_map(candidates_dict)
-        result.idf_map = idf_map
-        result.default_idf = float(default_idf)
+    if compute_idf_map:
+        candidates_dict = {str(c.get("siret") or ""): c for c in pool_list if c.get("siret")}
+        if candidates_dict:
+            idf_map, default_idf = compute_name_idf_map(candidates_dict)
+            result.idf_map = idf_map
+            result.default_idf = float(default_idf)
 
     if result.gt_in_base_pool and not result.gt_in_filtered_pool:
         if not config.include_closed:
@@ -395,9 +451,10 @@ def build_candidate_pool(
         else:
             result.loss_reason = "FILTERED_OTHER"
 
-    # Step 3: Universal rescue whitelist (addr_hash + numeric tokens)
+    # Step 3: Universal rescue whitelist (addr_hash with density guard + numeric tokens + public expansion)
     whitelisted_sirets: set[str] = set()
     if pool_list:
+        # 3a. Address rescue with density guard (<= address_density_cap, default 5)
         addr_index = build_address_hash_index(pool_list)
         num_index = build_numeric_token_index(pool_list)
 
@@ -406,12 +463,17 @@ def build_candidate_pool(
             crm_pre.get("crm_street_name"),
         )
         if config.rescue_addr_hash and addr_h and addr_index:
-            for idx in addr_index.get(addr_h, []):
-                if idx < len(pool_list):
-                    siret = str(pool_list[idx].get("siret") or "")
-                    if siret:
-                        whitelisted_sirets.add(siret)
+            matching_indices = addr_index.get(addr_h, [])
+            # Density Guard: Only rescue if co-tenants <= address_density_cap (default 5)
+            # Avoids flooding with dozens of shell companies from business centers / domiciliation
+            if matching_indices and len(matching_indices) <= config.address_density_cap:
+                for idx in matching_indices:
+                    if idx < len(pool_list):
+                        siret = str(pool_list[idx].get("siret") or "")
+                        if siret:
+                            whitelisted_sirets.add(siret)
 
+        # 3b. Numeric token rescue
         numeric_tokens = extract_numeric_tokens(crm_name)
         if config.rescue_numeric_tokens and numeric_tokens and num_index:
             for token in numeric_tokens:
@@ -420,6 +482,16 @@ def build_candidate_pool(
                         siret = str(pool_list[idx].get("siret") or "")
                         if siret:
                             whitelisted_sirets.add(siret)
+
+        # 3c. Public sector expansion (secondary establishments of local commune/public authorities)
+        if config.rescue_public_expansion and _is_public_sector_query(crm_name):
+            for cand in pool_list:
+                cj = str(cand.get("cj_ul") or "")
+                # Public sector legal entities: cj_ul starting with '7' (collectivités, EPA, etc.)
+                if cj.startswith("7"):
+                    siret = str(cand.get("siret") or "")
+                    if siret:
+                        whitelisted_sirets.add(siret)
 
     # Step 4: Prefilter — hybrid sparse (TF-IDF) + dense (FAISS) + rescue
     candidates = pool_list
@@ -619,8 +691,7 @@ def inject_gt_if_missing(
     gt_siret = str(gt_candidate.get("siret", "")).zfill(14)
     if not gt_siret:
         return result
-    existing_sirets = _get_siret_set(result.candidates)
-    if gt_siret not in existing_sirets:
+    if not _check_siret_in_list(result.candidates, gt_siret):
         result.candidates.append(gt_candidate)
         result.gt_was_injected = True
     return result

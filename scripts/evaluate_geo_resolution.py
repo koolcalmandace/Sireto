@@ -45,6 +45,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.xgb_matcher.checkpoint import CheckpointManager
 from src.xgb_matcher.features import preprocess_crm_row
+from src.xgb_matcher.memory_governor import MemoryGovernor
 from src.xgb_matcher.partitioned_store import PartitionedCandidateStore
 from src.xgb_matcher.power_guard import PowerMonitor
 from src.xgb_matcher.retrieval import build_candidate_pool
@@ -70,6 +71,21 @@ def load_crm_gt(path: Path) -> List[Dict[str, str]]:
     return rows
 
 
+def cluster_rows_by_locality(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    In-Python geographic clustering for optimal memory and cache locality.
+    Groups queries by primary geographic key (INSEE code, then postcode)
+    so that queries belonging to the same commune execute sequentially.
+    Preserves original row dictionaries completely untouched.
+    """
+    def _geo_key(r: Dict[str, Any]) -> tuple:
+        insee = (r.get("crm_insee") or r.get("insee") or "").strip()
+        cp = (r.get("crm_cp") or r.get("postcode") or "").strip()
+        return (0 if insee else 1, insee or "99999", cp or "99999")
+
+    return sorted(rows, key=_geo_key)
+
+
 def evaluate(
     rows: List[Dict[str, str]],
     partitions_dir: Path,
@@ -82,7 +98,8 @@ def evaluate(
     resume: bool = True,
     fresh: bool = False,
     checkpoint_interval: int = 100,
-    cache_size: int = 150,
+    cache_size: int = 40,
+    max_ram_gb: float = 4.0,
     enable_power_monitor: bool = True,
     pause_on_lock: bool = True,
     idle_timeout_seconds: float = 300.0,
@@ -96,6 +113,11 @@ def evaluate(
         fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
         logger.addHandler(fh)
 
+    memory_gov = MemoryGovernor(
+        target_max_gb=max_ram_gb,
+        critical_max_gb=max_ram_gb + 0.5,
+        check_interval=10,
+    )
     store = PartitionedCandidateStore(partitions_dir, max_cache_size=cache_size)
     config = RetrievalConfigV1(
         prefilter_k=prefilter_k,
@@ -124,11 +146,7 @@ def evaluate(
         save_interval=checkpoint_interval,
     )
 
-    is_resumed = False
-    if resume and not fresh and ckpt.is_resumable():
-        is_resumed = ckpt.load()
-
-    # Setup Details CSV writer
+    # Setup Details CSV writer and synchronize state
     details_path = output_dir / f"geo_benchmark_{tag}_details.csv"
     detail_fieldnames = [
         "crm_id",
@@ -146,7 +164,34 @@ def evaluate(
         "gt_in_prefilter",
         "loss_reason",
     ]
+
+    processed_crm_ids: Set[str] = set()
+    is_resumed = False
+    if resume and not fresh:
+        processed_crm_ids = ckpt.sync_from_details_csv(details_path, detail_fieldnames)
+        is_resumed = len(processed_crm_ids) > 0
+
     ckpt.init_details_writer(details_path, detail_fieldnames, resume=is_resumed)
+
+    # Filter out already processed rows
+    if processed_crm_ids:
+        unprocessed_rows = [
+            r for r in rows
+            if (r.get("crm_id") or r.get("id") or "").strip() not in processed_crm_ids
+        ]
+        logger.info(
+            "Resumed: %d / %d queries already completed (%.1f%%). Scheduling remaining %d queries...",
+            len(processed_crm_ids),
+            len(rows),
+            (len(processed_crm_ids) / max(len(rows), 1)) * 100,
+            len(unprocessed_rows),
+        )
+    else:
+        unprocessed_rows = list(rows)
+
+    # In-Python geographic clustering for optimal cache locality and speed
+    eval_rows = cluster_rows_by_locality(unprocessed_rows)
+    logger.info("Geographic clustering complete: %d queries grouped by commune.", len(eval_rows))
 
     # Power Monitor setup
     power_mon = PowerMonitor(
@@ -157,21 +202,17 @@ def evaluate(
         power_mon.start()
 
     logger.info(
-        "Evaluating %d CRM rows (Resumed: %s, Starting at idx: %d)...",
+        "Evaluating %d CRM rows (Already completed: %d, To process: %d)...",
         len(rows),
-        is_resumed,
-        ckpt.last_processed_idx + 1,
+        len(processed_crm_ids),
+        len(eval_rows),
     )
 
     try:
         t_batch_start = time.perf_counter()
         tfidf_cache: OrderedDict = OrderedDict()
 
-        for idx, r in enumerate(rows):
-            # Skip rows already processed in previous run
-            if is_resumed and idx <= ckpt.last_processed_idx:
-                continue
-
+        for idx, r in enumerate(eval_rows):
             gt_siret = (r.get("gt_siret") or r.get("ground_truth_siret") or "").strip()
             if not gt_siret:
                 continue
@@ -212,6 +253,7 @@ def evaluate(
                     persistent_cache=cache,
                     timer=timer,
                     siren_to_geo=siren_to_geo,
+                    compute_idf_map=False,
                 )
 
                 gt_in_base = bool(res.gt_in_base_pool)
@@ -265,27 +307,42 @@ def evaluate(
                 elapsed_delta=delta_t,
             )
 
-            # Periodic garbage collection at checkpoint boundaries
-            if ckpt.total_queries % checkpoint_interval == 0:
-                gc.collect()
+            # Memory Governor: dynamic check and release if memory ceiling approached
+            memory_gov.check_and_release(store=store, tfidf_cache=tfidf_cache)
 
-            if ckpt.total_queries % 2000 == 0:
+            # Periodic memory trim at checkpoint boundaries
+            if ckpt.total_queries % checkpoint_interval == 0:
+                memory_gov.release_memory(store=store, tfidf_cache=tfidf_cache, reason="CHECKPOINT")
+
+            if ckpt.total_queries % 250 == 0:
                 logger.info(
-                    "Processed %d/%d (%.1f%%) — Base Recall: %.2f%%, Prefilter@%d: %.2f%%",
+                    "Processed %d/%d (%.1f%%) — Base Recall: %.2f%%, Prefilter@%d: %.2f%% [RAM: %.2f GB / %.1f GB max]",
                     ckpt.total_queries,
                     len(rows),
                     (ckpt.total_queries / len(rows)) * 100,
                     (ckpt.gt_in_base_count / max(ckpt.total_queries, 1)) * 100,
                     prefilter_k,
                     (ckpt.gt_in_prefilter_count / max(ckpt.total_queries, 1)) * 100,
+                    memory_gov.get_rss_gb(),
+                    max_ram_gb,
                 )
 
-            # Check if power monitor signaled sleep / lid close / lock
-            if enable_power_monitor and power_mon.should_pause():
+            # Check if power monitor signaled shutdown vs sleep / lid close / lock
+            if enable_power_monitor and power_mon.should_exit():
+                logger.warning("[SHUTDOWN] System shutdown / terminal close detected! Flushing state and exiting cleanly...")
+                memory_gov.release_memory(store=store, tfidf_cache=tfidf_cache, reason="SHUTDOWN")
+                ckpt.save(status="PAUSED", force=True)
+                logger.info("[SHUTDOWN] Checkpoint successfully flushed. Terminating process.")
+                sys.exit(0)
+
+            elif enable_power_monitor and power_mon.should_pause():
                 logger.info("[CHECKPOINT] Flushing state before entering safe pause...")
-                gc.collect()
+                memory_gov.release_memory(store=store, tfidf_cache=tfidf_cache, reason="POWER_PAUSE")
                 ckpt.save(status="PAUSED", force=True)
                 power_mon.wait_for_resume()
+                if power_mon.should_exit():
+                    logger.warning("[SHUTDOWN] System shutdown detected during pause. Exiting cleanly.")
+                    sys.exit(0)
                 logger.info("[CHECKPOINT] Resuming loop after safe sleep pause.")
 
     finally:
@@ -396,7 +453,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate Geo-Resolution & Retrieval Recall")
     parser.add_argument("--crm", type=Path, default=Path("data/crm_ok_gt.csv"), help="CRM Ground Truth CSV")
     parser.add_argument(
-        "--partitions-dir", type=Path, default=Path("data/candidates_v7_all"), help="Partitions directory"
+        "--partitions-dir", type=Path, default=Path("data/candidates_v8_national"), help="Partitions directory"
     )
     parser.add_argument(
         "--output-dir", type=Path, default=Path("reports/geo_validation"), help="Output reports directory"
@@ -406,8 +463,8 @@ def main() -> None:
     parser.add_argument(
         "--siren-to-geo",
         type=Path,
-        default=Path("data/siren_index/siren_to_geo.parquet"),
-        help="SIREN-to-geo index path",
+        default=None,
+        help="Optional SIREN-to-geo index path (Default: None)",
     )
     parser.add_argument("--log-file", type=Path, default=None, help="Optional log file path")
     parser.add_argument("--max-rows", type=int, default=0, help="Limit rows (0 for all)")
@@ -448,8 +505,14 @@ def main() -> None:
     parser.add_argument(
         "--cache-size",
         type=int,
-        default=150,
-        help="Max cached communes in RAM for store and TF-IDF (Default: 150)",
+        default=40,
+        help="Max cached communes in RAM for store and TF-IDF (Default: 40)",
+    )
+    parser.add_argument(
+        "--max-ram-gb",
+        type=float,
+        default=4.0,
+        help="Maximum RAM ceiling in GB before proactive purge/trim (Default: 4.0)",
     )
 
     args = parser.parse_args()
@@ -462,7 +525,7 @@ def main() -> None:
     if args.max_rows > 0:
         rows = rows[:args.max_rows]
 
-    siren_geo = args.siren_to_geo if args.siren_to_geo.exists() else None
+    siren_geo = args.siren_to_geo if (args.siren_to_geo and args.siren_to_geo.exists()) else None
     evaluate(
         rows=rows,
         partitions_dir=args.partitions_dir,
@@ -476,6 +539,7 @@ def main() -> None:
         fresh=args.fresh,
         checkpoint_interval=args.checkpoint_interval,
         cache_size=args.cache_size,
+        max_ram_gb=args.max_ram_gb,
         enable_power_monitor=args.enable_power_monitor,
         pause_on_lock=args.pause_on_lock,
         idle_timeout_seconds=args.idle_timeout,

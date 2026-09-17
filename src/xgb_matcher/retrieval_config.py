@@ -56,6 +56,8 @@ class RetrievalConfigV1:
     # Rescue
     rescue_addr_hash: bool = True
     rescue_numeric_tokens: bool = True
+    rescue_public_expansion: bool = True
+    address_density_cap: int = 5
 
     # Mega-communes policy
     mega_insee_max_rows: int = 100_000
@@ -107,6 +109,8 @@ class RetrievalConfigV1:
             "max_names_per_candidate": self.max_names_per_candidate,
             "rescue_addr_hash": self.rescue_addr_hash,
             "rescue_numeric_tokens": self.rescue_numeric_tokens,
+            "rescue_public_expansion": self.rescue_public_expansion,
+            "address_density_cap": self.address_density_cap,
             "mega_insee_max_rows": self.mega_insee_max_rows,
             "mega_insee_policy": self.mega_insee_policy,
             "sparse_retrieval_enabled": self.sparse_retrieval_enabled,
@@ -157,6 +161,8 @@ class RetrievalConfigV1:
             max_names_per_candidate=data.get("max_names_per_candidate", cls().max_names_per_candidate),
             rescue_addr_hash=bool(data.get("rescue_addr_hash", cls().rescue_addr_hash)),
             rescue_numeric_tokens=bool(data.get("rescue_numeric_tokens", cls().rescue_numeric_tokens)),
+            rescue_public_expansion=bool(data.get("rescue_public_expansion", cls().rescue_public_expansion)),
+            address_density_cap=int(data.get("address_density_cap", cls().address_density_cap)),
             mega_insee_max_rows=int(data.get("mega_insee_max_rows", cls().mega_insee_max_rows)),
             mega_insee_policy=data.get("mega_insee_policy", cls().mega_insee_policy),
             sparse_retrieval_enabled=bool(data.get("sparse_retrieval_enabled", cls().sparse_retrieval_enabled)),

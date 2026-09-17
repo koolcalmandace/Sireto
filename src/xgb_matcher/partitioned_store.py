@@ -9,6 +9,7 @@ Loads candidates from partitioned parquet folders:
 from __future__ import annotations
 
 from collections import OrderedDict
+import os
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -19,9 +20,9 @@ import pyarrow.parquet as pq
 from .blocking import normalize_code, department_from_code
 
 # Maximum number of entries per store cache (INSEE / CP / dept)
-# Calibrated to 150 to guarantee memory safety (< 5 GB RAM) while maintaining
-# an optimal cache-hit rate (~35% hits on CRM sequence, minimal overhead).
-_MAX_STORE_CACHE_SIZE = 150
+# Calibrated to 40 to guarantee strict memory ceiling (< 4.5 GB RAM) while maintaining
+# an optimal cache-hit rate (~30-35% hits on contiguous CRM sequences).
+_MAX_STORE_CACHE_SIZE = 40
 
 # Columns actually used by features, naming, filtering, and output.
 # Excludes unused columns (nom_usage_ul, pseudonyme_ul) to reduce I/O and RAM.
@@ -57,18 +58,29 @@ class PartitionedCandidateStore:
         self._columns_insee = self._detect_sample_columns(self.partitions_dir / "insee")
         self._columns_cp = self._detect_sample_columns(self.partitions_dir / "cp")
 
+    def clear_all_caches(self) -> None:
+        """Purge all in-memory LRU caches to immediately reclaim RAM."""
+        self._cache_insee.clear()
+        self._cache_cp.clear()
+        self._cache_cp_insee.clear()
+        self._cache_dept.clear()
+        self._cache_insee_count.clear()
+
     @staticmethod
     def _detect_sample_columns(partition_root: Path) -> List[str] | None:
         """Inspect column names from the first available parquet file in O(1) without scanning."""
         if not partition_root.exists():
             return None
         try:
-            for entry in partition_root.iterdir():
-                if entry.is_dir():
-                    for f in entry.glob("*.parquet"):
-                        schema_names = set(pq.read_schema(f).names)
-                        cols = [c for c in REQUIRED_COLUMNS if c in schema_names]
-                        return cols if cols else None
+            with os.scandir(partition_root) as it:
+                for entry in it:
+                    if entry.is_dir():
+                        with os.scandir(entry.path) as sub_it:
+                            for f in sub_it:
+                                if f.name.endswith(".parquet"):
+                                    schema_names = set(pq.read_schema(f.path).names)
+                                    cols = [c for c in REQUIRED_COLUMNS if c in schema_names]
+                                    return cols if cols else None
         except Exception:
             pass
         return REQUIRED_COLUMNS
@@ -152,6 +164,9 @@ class PartitionedCandidateStore:
                     tables = [pq.read_table(f, columns=self._columns_insee) for f in parquet_files]
                     table = pa.concat_tables(tables) if len(tables) > 1 else tables[0]
                     rows = self._coerce_candidate_types(table.to_pylist())
+                    for r in rows:
+                        if not r.get("insee"):
+                            r["insee"] = code
                     # Defensive guard: deduplicate SIRETs if multiple partitions were concatenated
                     if len(tables) > 1:
                         seen: set = set()
@@ -186,6 +201,9 @@ class PartitionedCandidateStore:
                     tables = [pq.read_table(f, columns=self._columns_cp) for f in parquet_files]
                     table = pa.concat_tables(tables) if len(tables) > 1 else tables[0]
                     rows = self._coerce_candidate_types(table.to_pylist())
+                    for r in rows:
+                        if not r.get("postcode"):
+                            r["postcode"] = code
                     if len(tables) > 1:
                         seen: set = set()
                         deduped = []
@@ -339,7 +357,12 @@ class PartitionedCandidateStore:
                 )
                 combined: dict = {}
                 for child_insee in child_insees:
-                    partial = self.load_by_insee(child_insee)
+                    partial = self.load_by_insee_then_postcode(
+                        child_insee,
+                        code_cp,
+                        mega_insee_max_rows=mega_insee_max_rows,
+                        mega_insee_policy=mega_insee_policy,
+                    )
                     for r in partial:
                         siret = str(r.get("siret") or "")
                         if siret and siret not in combined:
