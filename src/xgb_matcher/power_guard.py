@@ -67,15 +67,19 @@ class PowerMonitor:
         poll_interval: float = 1.0,
         on_pause_callback: Optional[Callable[[], None]] = None,
         on_resume_callback: Optional[Callable[[], None]] = None,
+        on_exit_callback: Optional[Callable[[], None]] = None,
     ) -> None:
         self.pause_on_lock = pause_on_lock
         self.idle_timeout_seconds = idle_timeout_seconds
         self.poll_interval = poll_interval
         self.on_pause_callback = on_pause_callback
         self.on_resume_callback = on_resume_callback
+        self.on_exit_callback = on_exit_callback
 
         self._should_pause = False
         self._pause_reason = ""
+        self._should_exit = False
+        self._exit_reason = ""
         self._running = False
         self._monitor_thread: Optional[threading.Thread] = None
         self._ctrl_handler_ref = None
@@ -94,9 +98,18 @@ class PowerMonitor:
         """Convenience method for worker loops to query pause status."""
         return self._should_pause
 
+    @property
+    def is_exit_requested(self) -> bool:
+        """Check if a terminal exit (OS shutdown/window close) has been requested."""
+        return self._should_exit
+
+    def should_exit(self) -> bool:
+        """Convenience method for worker loops to query terminal exit status."""
+        return self._should_exit
+
     def trigger_pause(self, reason: str = "Manual / System Event") -> None:
         """Signal that computation must pause cleanly after current query."""
-        if not self._should_pause:
+        if not self._should_pause and not self._should_exit:
             self._should_pause = True
             self._pause_reason = reason
             self._resume_event.clear()
@@ -109,9 +122,29 @@ class PowerMonitor:
                 except Exception as e:
                     logger.error("Error in on_pause_callback: %s", e)
 
+    def trigger_exit(self, reason: str = "System Shutdown") -> None:
+        """Signal that computation must immediately flush and exit (OS shutdown/terminal close)."""
+        if not self._should_exit:
+            self._should_exit = True
+            self._exit_reason = reason
+            # Cancel pause and unblock any waiting thread immediately so the process can exit cleanly
+            self._should_pause = False
+            self._pause_event.clear()
+            self._resume_event.set()
+            _set_thread_execution_state(prevent_sleep=False)
+            logger.warning(
+                "[POWER GUARD] Terminal exit requested (%s). Unblocking wait loop for immediate clean exit...",
+                reason,
+            )
+            if self.on_exit_callback:
+                try:
+                    self.on_exit_callback()
+                except Exception as e:
+                    logger.error("Error in on_exit_callback: %s", e)
+
     def trigger_resume(self, reason: str = "System Resumed") -> None:
         """Signal that computation may resume."""
-        if self._should_pause:
+        if self._should_pause and not self._should_exit:
             logger.info("[POWER GUARD] Resume signal received (%s). Resuming computation...", reason)
             self._should_pause = False
             self._pause_reason = ""
@@ -126,23 +159,30 @@ class PowerMonitor:
 
     def wait_for_resume(self, timeout: Optional[float] = None) -> bool:
         """
-        Blocks caller at 0% CPU until system resumes from sleep / lock / inactivity.
-        Returns True if resumed, False if timeout or stopped.
+        Blocks caller at 0% CPU until system resumes from sleep / lock / inactivity,
+        or returns immediately if system is shutting down (should_exit).
+        Returns True if resumed, False if timeout, stopped, or should exit.
         """
+        if self._should_exit:
+            return False
+
         logger.info(
             "[POWER GUARD] Computation safely paused for: '%s'. CPU load yielded to 0%%. Waiting for resume/wake...",
             self._pause_reason or "Sleep/Lid Event"
         )
         start_time = time.time()
-        while self._should_pause and self._running:
-            # Sleep in short intervals so thread responds to Ctrl+C or kill signals
+        while self._should_pause and self._running and not self._should_exit:
+            # Sleep in short intervals so thread responds to Ctrl+C, shutdown, or kill signals
             resumed = self._resume_event.wait(timeout=0.5)
+            if self._should_exit:
+                logger.warning("[POWER GUARD] Unblocked from pause: System shutdown requested!")
+                return False
             if resumed and not self._should_pause:
                 logger.info("[POWER GUARD] Woke up! Resuming execution seamlessly.")
                 return True
             if timeout is not None and (time.time() - start_time) >= timeout:
                 return not self._should_pause
-        return True
+        return not self._should_exit
 
     def start(self) -> None:
         """Start power monitoring thread and register OS hooks."""
@@ -192,8 +232,8 @@ class PowerMonitor:
                 self.trigger_pause("User Ctrl+C Interrupt")
                 return True  # Handled
             elif ctrl_type in (CTRL_CLOSE_EVENT, CTRL_SHUTDOWN_EVENT, CTRL_LOGOFF_EVENT):
-                logger.warning("[POWER GUARD] System shutdown / console close detected! Triggering emergency checkpoint flush.")
-                self.trigger_pause("System Shutdown / Window Close")
+                logger.warning("[POWER GUARD] System shutdown / console close detected! Triggering immediate clean exit.")
+                self.trigger_exit("System Shutdown / Window Close")
                 time.sleep(1.0)
                 return True
             return False
@@ -276,11 +316,15 @@ class PowerMonitor:
                     pass
 
     def _register_posix_signals(self) -> None:
-        """Register POSIX signal handlers (SIGINT, SIGTERM) for Linux/Mac."""
-        def sig_handler(signum, frame):
-            logger.info("[POWER GUARD] Signal %s received. Triggering safe pause...", signum)
+        """Register POSIX signal handlers (SIGINT for pause, SIGTERM for clean exit) for Linux/Mac."""
+        def sigint_handler(signum, frame):
+            logger.info("[POWER GUARD] Signal SIGINT received. Triggering safe pause...")
             self.trigger_pause(f"POSIX Signal {signum}")
 
-        signal.signal(signal.SIGINT, sig_handler)
-        signal.signal(signal.SIGTERM, sig_handler)
+        def sigterm_handler(signum, frame):
+            logger.warning("[POWER GUARD] Signal SIGTERM received. Triggering clean exit...")
+            self.trigger_exit(f"POSIX Signal {signum}")
+
+        signal.signal(signal.SIGINT, sigint_handler)
+        signal.signal(signal.SIGTERM, sigterm_handler)
 

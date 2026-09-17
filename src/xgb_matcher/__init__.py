@@ -29,6 +29,7 @@ from .features import (
 from .naming import build_candidate_names, primary_name, NameSource, CandidateName
 from .checkpoint import CheckpointManager
 from .power_guard import PowerMonitor
+from .memory_governor import MemoryGovernor
 
 __all__ = [
     "normalize_text",
@@ -54,4 +55,5 @@ __all__ = [
     "CandidateName",
     "CheckpointManager",
     "PowerMonitor",
+    "MemoryGovernor",
 ]

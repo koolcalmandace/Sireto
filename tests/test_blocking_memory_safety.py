@@ -120,9 +120,9 @@ def test_partitioned_store_default_cache_limit(tmp_path):
     """Verify PartitionedCandidateStore defaults to 150 and evicts properly."""
     from src.xgb_matcher.partitioned_store import PartitionedCandidateStore, _MAX_STORE_CACHE_SIZE
 
-    assert _MAX_STORE_CACHE_SIZE == 150
+    assert _MAX_STORE_CACHE_SIZE == 40
     store = PartitionedCandidateStore(tmp_path)
-    assert store.max_cache_size == 150
+    assert store.max_cache_size == 40
 
     # Custom capacity support
     custom_store = PartitionedCandidateStore(tmp_path, max_cache_size=5)

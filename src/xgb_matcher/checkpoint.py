@@ -123,6 +123,125 @@ class CheckpointManager:
         )
         return True
 
+    def get_processed_crm_ids(self, details_path: Optional[Path] = None) -> Set[str]:
+        """Return the set of unique crm_ids already present in the details CSV."""
+        path = Path(details_path) if details_path else self._details_path
+        if not path or not path.exists():
+            return set()
+        processed: Set[str] = set()
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                reader = csv.reader(f, delimiter=";")
+                header = next(reader, None)
+                if not header:
+                    return set()
+                crm_id_col = 0
+                for i, col in enumerate(header):
+                    if col.strip().lower() in ("crm_id", "id"):
+                        crm_id_col = i
+                        break
+                for row in reader:
+                    if row and len(row) > crm_id_col:
+                        cid = row[crm_id_col].strip()
+                        if cid:
+                            processed.add(cid)
+        except Exception as e:
+            logger.warning("Error reading processed IDs from %s: %s", path, e)
+        return processed
+
+    @staticmethod
+    def _count_file_lines(path: Path) -> int:
+        count = 0
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for _ in f:
+                count += 1
+        return count
+
+    def sync_from_details_csv(self, details_path: Path, fieldnames: List[str]) -> Set[str]:
+        """
+        Deduplicates details CSV if needed, rebuilds state metrics (total_queries, gt counts,
+        stratification) from ground-truth details rows, and returns the set of completed crm_ids.
+        """
+        path = Path(details_path)
+        if not path.exists() or path.stat().st_size == 0:
+            return set()
+
+        seen_ids: Set[str] = set()
+        unique_rows: List[Dict[str, Any]] = []
+
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                reader = csv.DictReader(f, delimiter=";")
+                for row in reader:
+                    cid = (row.get("crm_id") or row.get("id") or "").strip()
+                    if cid and cid not in seen_ids:
+                        seen_ids.add(cid)
+                        unique_rows.append(row)
+        except Exception as e:
+            logger.warning("Error reading details CSV for sync: %s", e)
+            return self.get_processed_crm_ids(path)
+
+        # Reconstruct metrics
+        self.total_queries = len(unique_rows)
+        self.gt_in_base_count = 0
+        self.gt_in_filtered_count = 0
+        self.gt_in_prefilter_count = 0
+        self.by_loc_type.clear()
+        self.by_etat.clear()
+        self.loss_reasons.clear()
+
+        for r in unique_rows:
+            gt_base = r.get("gt_in_base", "").lower() in ("true", "1")
+            gt_filtered = r.get("gt_in_filtered", "").lower() in ("true", "1")
+            gt_pref = r.get("gt_in_prefilter", "").lower() in ("true", "1")
+            loc_type = (r.get("loc_type") or "UNKNOWN").strip()
+            etat = (r.get("sirene_etat") or "UNKNOWN").strip()
+            reason = (r.get("loss_reason") or "").strip()
+
+            if gt_base:
+                self.gt_in_base_count += 1
+            if gt_filtered:
+                self.gt_in_filtered_count += 1
+            if gt_pref:
+                self.gt_in_prefilter_count += 1
+            if reason:
+                self.loss_reasons[reason] += 1
+
+            if loc_type not in self.by_loc_type:
+                self.by_loc_type[loc_type] = {"total": 0, "base": 0, "prefilter": 0}
+            self.by_loc_type[loc_type]["total"] += 1
+            if gt_base:
+                self.by_loc_type[loc_type]["base"] += 1
+            if gt_pref:
+                self.by_loc_type[loc_type]["prefilter"] += 1
+
+            if etat not in self.by_etat:
+                self.by_etat[etat] = {"total": 0, "base": 0, "prefilter": 0}
+            self.by_etat[etat]["total"] += 1
+            if gt_base:
+                self.by_etat[etat]["base"] += 1
+            if gt_pref:
+                self.by_etat[etat]["prefilter"] += 1
+
+        # If deduplication occurred, rewrite clean file atomically
+        total_file_lines = self._count_file_lines(path)
+        if len(unique_rows) != total_file_lines - 1:
+            tmp_path = path.with_suffix(".tmp")
+            with open(tmp_path, "w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter=";", extrasaction="ignore")
+                writer.writeheader()
+                writer.writerows(unique_rows)
+            os.replace(tmp_path, path)
+            logger.info("[CHECKPOINT] Deduplicated details CSV: %d unique queries preserved.", len(unique_rows))
+
+        logger.info(
+            "[CHECKPOINT] Synchronized state from details CSV: %d queries completed (Base: %.2f%%, Prefilter: %.2f%%)",
+            self.total_queries,
+            (self.gt_in_base_count / max(self.total_queries, 1)) * 100,
+            (self.gt_in_prefilter_count / max(self.total_queries, 1)) * 100,
+        )
+        return seen_ids
+
     def init_details_writer(self, details_path: Path, fieldnames: List[str], resume: bool = False) -> None:
         """Initialize streaming details CSV writer with atomic header creation."""
         self._details_path = Path(details_path)

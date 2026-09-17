@@ -79,12 +79,16 @@ sequenceDiagram
   - **Détection d'inactivité utilisateur (`idle_timeout_seconds=300.0`)** : Surveillance continue du temps écoulé depuis la dernière saisie clavier/souris (`GetLastInputInfo`). Après 5 minutes d'inactivité continue (aligné sur le seuil de veille Windows), le calcul est automatiquement mis en pause propre pour préparer la mise en veille sans surchauffe ni conflit électrique.
   - **Inhibition veille intempestive (`SetThreadExecutionState`)** : Pendant l'exécution active (écran ouvert et activité), le script informe l'OS via l'API Win32 d'inhiber la mise en veille d'inactivité ; dès la pause ou l'arrêt, l'inhibition est relâchée pour permettre à la machine d'entrer en veille matérielle froide.
   - **Détection des discontinuités temporelles** : Détection des sauts de `time.monotonic()` caractéristiques des réveils après veille ou hibernation pour réajuster la télémétrie.
-  - **Capture propre des signaux console** : Capture des interruptions et fermetures (`CTRL_C_EVENT`, `CTRL_CLOSE_EVENT`, `CTRL_SHUTDOWN_EVENT`, `CTRL_LOGOFF_EVENT`).
+  - **Différenciation stricte Veille Transitoire vs Arrêt Terminal (`should_exit` vs `should_pause`)** :
+    - *Événements terminaux OS* (`CTRL_SHUTDOWN_EVENT`, `CTRL_LOGOFF_EVENT`, `CTRL_CLOSE_EVENT`, `SIGTERM`) : Déclenchent `trigger_exit()`. Le process débloque immédiatement toute veille en cours, vide le checkpoint en mode atomique et termine immédiatement avec code 0 (`sys.exit(0)`) dans le délai de grâce accordé par Windows (5 secondes / `WaitToKillAppTimeout`), sans jamais entrer en attente infinie de réveil.
+    - *Événements transitoires* (verrouillage de session, inactivité 300s, `CTRL_C`) : Déclenchent `trigger_pause()`. Le process cède le CPU à 0% et attend passivement le réveil (`wait_for_resume()`).
 - **Comportement de Pause Propre** :
   - Fin de la requête unitaire en cours.
   - Sauvegarde atomique du checkpoint et vidage des buffers CSV sur disque.
   - Cession intégrale du CPU (`threading.Event.wait()`) pour permettre une veille matérielle standard à 0% d'utilisation.
 - **Reprise Automatique** : Dès la détection du déverrouillage, du réveil ou de la reprise d'activité utilisateur (clavier/souris), reprise immédiate et transparente des calculs à la requête $N+1$.
+- **Mise en garde PowerToys (PowerToys Awake)** :
+  L'activation de l'utilitaire *PowerToys Awake* (ou maintien forcé d'éveil par injection d'inputs) inhibe les compteurs d'inactivité Win32 `GetLastInputInfo()`. Cela neutralise le garde-fou des 5 minutes et maintient le processeur à 100% de charge jusqu'à l'extinction brutale de la machine. *PowerToys Awake doit impérativement rester désactivé ou positionné sur le mode "Respecter le mode de gestion de l'alimentation"* lors des batchs lourds.
 
 ---
 

@@ -28,7 +28,8 @@ echo ============================================================
     --output-dir reports\geo_validation ^
     --tag 17k_baseline ^
     --prefilter-k 500 ^
-    --cache-size 150 ^
+    --cache-size 40 ^
+    --max-ram-gb 4.0 ^
     --log-file %LOG_DIR%\run_geo_benchmark_17k.log
 
 IF ERRORLEVEL 1 (

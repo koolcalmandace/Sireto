@@ -181,3 +181,97 @@ def test_power_monitor_inactivity_timeout():
         time.sleep(0.15)
         assert not pm.should_pause()
 
+
+def test_power_monitor_exit_trigger():
+    """Test that trigger_exit sets should_exit and executes callback."""
+    exit_called = []
+    pm = PowerMonitor(
+        on_exit_callback=lambda: exit_called.append(True),
+    )
+    assert not pm.should_exit()
+    assert not pm.is_exit_requested
+
+    pm.trigger_exit("System Shutdown Test")
+    assert pm.should_exit()
+    assert pm.is_exit_requested
+    assert not pm.should_pause()
+    assert len(exit_called) == 1
+    # When exit is requested, wait_for_resume returns False immediately
+    assert pm.wait_for_resume(timeout=1.0) is False
+
+
+def test_power_monitor_wait_for_resume_aborts_on_exit():
+    """Test that a paused thread waiting for resume unblocks immediately when exit/shutdown occurs."""
+    pm = PowerMonitor()
+    with pm:
+        pm.trigger_pause("Temporary Pause")
+        assert pm.should_pause()
+
+        wait_result = []
+
+        def worker():
+            ok = pm.wait_for_resume(timeout=5.0)
+            wait_result.append(ok)
+
+        t = threading.Thread(target=worker)
+        t.start()
+
+        time.sleep(0.2)
+        assert t.is_alive()  # Still waiting for resume
+
+        # Now simulate an OS shutdown triggering terminal exit
+        t_start = time.time()
+        pm.trigger_exit("OS Shutdown")
+        t.join(timeout=2.0)
+        elapsed = time.time() - t_start
+
+        # Thread must have unblocked immediately (< 1s), well before the 5.0s timeout!
+        assert not t.is_alive()
+        assert elapsed < 1.5
+        assert wait_result == [False]
+        assert pm.should_exit()
+
+
+def test_checkpoint_sync_from_details_csv(temp_dir):
+    """Test sync_from_details_csv correctly deduplicates and reconstructs checkpoint stats."""
+    details_csv = temp_dir / "details.csv"
+    fieldnames = ["crm_id", "loc_type", "sirene_etat", "gt_in_base", "gt_in_filtered", "gt_in_prefilter", "loss_reason"]
+
+    # Write synthetic CSV with a duplicate crm_id (ID_1 appears twice)
+    with open(details_csv, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter=";")
+        writer.writeheader()
+        writer.writerow({"crm_id": "ID_1", "loc_type": "INSEE", "sirene_etat": "A", "gt_in_base": "True", "gt_in_filtered": "True", "gt_in_prefilter": "True", "loss_reason": ""})
+        writer.writerow({"crm_id": "ID_2", "loc_type": "INSEE", "sirene_etat": "A", "gt_in_base": "True", "gt_in_filtered": "True", "gt_in_prefilter": "False", "loss_reason": "PRUNED"})
+        writer.writerow({"crm_id": "ID_1", "loc_type": "INSEE", "sirene_etat": "A", "gt_in_base": "True", "gt_in_filtered": "True", "gt_in_prefilter": "True", "loss_reason": ""})
+
+    mgr = CheckpointManager(tag="test_sync", checkpoint_dir=temp_dir / "ckpts", total_rows=10)
+    seen_ids = mgr.sync_from_details_csv(details_csv, fieldnames)
+
+    assert seen_ids == {"ID_1", "ID_2"}
+    assert mgr.total_queries == 2
+    assert mgr.gt_in_base_count == 2
+    assert mgr.gt_in_prefilter_count == 1
+    assert mgr.loss_reasons["PRUNED"] == 1
+
+
+def test_cluster_rows_by_locality():
+    """Test in-Python geographic clustering groups rows with same insee/postcode together."""
+    from scripts.evaluate_geo_resolution import cluster_rows_by_locality
+
+    raw_rows = [
+        {"crm_id": "1", "crm_insee": "75101", "crm_cp": "75001"},
+        {"crm_id": "2", "crm_insee": "13001", "crm_cp": "13001"},
+        {"crm_id": "3", "crm_insee": "75101", "crm_cp": "75001"},
+        {"crm_id": "4", "crm_insee": "69001", "crm_cp": "69001"},
+        {"crm_id": "5", "crm_insee": "75101", "crm_cp": "75001"},
+    ]
+
+    clustered = cluster_rows_by_locality(raw_rows)
+    clustered_insee = [r["crm_insee"] for r in clustered]
+
+    # Both Marseille and Lyon are grouped, and all three Paris 75101 queries are adjacent
+    assert clustered_insee == ["13001", "69001", "75101", "75101", "75101"]
+
+
+
