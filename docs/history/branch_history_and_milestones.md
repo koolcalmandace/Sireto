@@ -61,7 +61,8 @@ timeline
 | :--- | :--- | :--- | :---: |
 | `main` | - | Branche stable de production (V7 baseline). | Active / Protégée |
 | `feature/geo-resolution-and-crm-expansion` | `main` | Implémentation résolution géo stricte, benchmarks 17k/15k, résilience batch et fusion CRM 32 570. | **Validée (Étapes 1-4)** |
-| `feature/v8-national-partitions-and-retrieval` | `feature/geo-resolution-and-crm-expansion` | Intégration Store National V8, expansion sectorielle publique vectorielle et repêchage densité. | **Active (Courante)** |
+| `feature/v8-national-partitions-and-retrieval` | `feature/geo-resolution-and-crm-expansion` | Intégration Store National V8, expansion sectorielle publique vectorielle et repêchage densité. | **Validée (Étape 5)** |
+| `feature/tfidf-semantic-prototypes-and-partition-completion` | `feature/v8-national-partitions-and-retrieval` | Prototypes TF-IDF étendus (6 familles), cap adresse universel à 10 et réparation des 12 départements manquants. | **Active (Courante)** |
 | `archive/pipe-v6-llm` | - | Sauvegarde de l'ancienne version avec LLMs. | Archivée |
 
 ---

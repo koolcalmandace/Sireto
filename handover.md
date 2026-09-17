@@ -1,7 +1,7 @@
 # SIRETO Active Handover Cockpit — 17 Septembre 2026
 
-**Branche active** : `feature/v8-national-partitions-and-retrieval` (issue de `feature/geo-resolution-and-crm-expansion`)  
-**Phase courante** : [Phase 3 : Intégration V8 National & Règles de Retrieval](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/history/phase3_geo_resolution_and_crm_expansion.md)  
+**Branche active** : `feature/tfidf-semantic-prototypes-and-partition-completion` (issue de `feature/v8-national-partitions-and-retrieval`)  
+**Phase courante** : [Phase 3b : Prototypes Sémantiques TF-IDF & Complétion Partitions V8](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/history/phase3_geo_resolution_and_crm_expansion.md)  
 **Cartographie documentaire complète** : [docs/INDEX.md](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/INDEX.md)
 
 ---
@@ -15,7 +15,9 @@
 | **Étape 3** | **Validation Empirique Incrément 15 516** | ✅ **Validée (100% / 20 209 requêtes)** | [`geo_benchmark_15k_increment_summary.json`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/reports/geo_validation/geo_benchmark_15k_increment_summary.json), [`analysis_step3_*.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/analysis/analysis_step3_geo_benchmark_15k_increment.md), [`analysis_step3_pruned_cases_breakdown.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/analysis/analysis_step3_pruned_cases_breakdown.md) *(commit `61dfa1e`)* |
 | **Étape 4** | **Fusion Contrôlée des Datasets (32 570)** | ✅ **Validée (32 570 requêtes)** | [`merge_crm_increment.py`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/scripts/merge_crm_increment.py), [`data/crm_ok_gt_merged_v1.csv`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/data/crm_ok_gt_merged_v1.csv) *(commit `61dfa1e`)* |
 | **Étape 5** | **Store National V8 & Nouvelles Règles de Retrieval** | ✅ **Validée (70.14% / +3 859 requêtes)** | [`geo_benchmark_v8_recovery_5502_summary.json`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/reports/geo_validation/geo_benchmark_v8_recovery_5502_summary.json), [`analysis_step5_v8_recovery_5502.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/analysis/analysis_step5_v8_recovery_5502.md) *(commit `c77793b`)* |
+| **Étape 5b**| **Prototypes Sémantiques Étendus & Réparation Partitions** | 🔄 **En cours (Objectif >= 90%)** | [`scripts/repair_missing_v8_departments.py`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/scripts/), [`retrieval.py`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/src/xgb_matcher/retrieval.py) (Cap 10 + 6 Piliers Sémantiques) |
 | **Étape 6** | **Réentraînement XGBoost v2 (Ranker, Decider, Risk)** | ⏳ **Feuille de route cadrée** | Voir décisions clés ci-dessous |
+
 
 
 ---
