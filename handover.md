@@ -12,8 +12,8 @@
 | :---: | :--- | :---: | :--- |
 | **Étape 1** | **Unification Résolution Géo** (`load_with_geo_resolution`) | ✅ **Validée** | [`retrieval.py`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/src/xgb_matcher/retrieval.py), [`infer.py`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/src/xgb_matcher/infer.py) *(commit `fc4396b`)* |
 | **Étape 2** | **Validation Empirique 17k Baseline** (Zéro Régression) | ✅ **Validée** | [`geo_benchmark_17k_baseline_summary.json`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/reports/geo_validation/geo_benchmark_17k_baseline_summary.json), [`analysis_step2_*.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/analysis/analysis_step2_geo_benchmark_17k_baseline.md) |
-| **Étape 3** | **Validation Empirique Incrément 15 516** | 🔄 **En cours (~25% / 5k+ requêtes)** | [`run_geo_benchmark_increment.bat`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/scripts/run_geo_benchmark_increment.bat), [`geo_benchmark_15k_increment_details.csv`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/reports/geo_validation/geo_benchmark_15k_increment_details.csv) |
-| **Étape 4** | **Fusion Contrôlée des Datasets (32 570)** | ⏳ **En attente** | [`merge_crm_increment.py`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/scripts/merge_crm_increment.py) $\rightarrow$ `data/crm_ok_gt_merged_v1.csv` |
+| **Étape 3** | **Validation Empirique Incrément 15 516** | ✅ **Validée (100% / 20 209 requêtes)** | [`geo_benchmark_15k_increment_summary.json`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/reports/geo_validation/geo_benchmark_15k_increment_summary.json), [`analysis_step3_*.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/analysis/analysis_step3_geo_benchmark_15k_increment.md), [`analysis_step3_pruned_cases_breakdown.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/analysis/analysis_step3_pruned_cases_breakdown.md) *(commit `61dfa1e`)* |
+| **Étape 4** | **Fusion Contrôlée des Datasets (32 570)** | ✅ **Validée (32 570 requêtes)** | [`merge_crm_increment.py`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/scripts/merge_crm_increment.py), [`data/crm_ok_gt_merged_v1.csv`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/data/crm_ok_gt_merged_v1.csv) *(commit `61dfa1e`)* |
 | **Étape 5** | **Génération Store SIRENE National V8 (France Entière)** | ✅ **Terminée (29 219 communes)** | [`build_candidate_partitions_national.py`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/scripts/build_candidate_partitions_national.py) $\rightarrow$ `data/candidates_v8_national/` |
 | **Étape 6** | **Réentraînement XGBoost v2 (Ranker, Decider, Risk)** | ⏳ **Feuille de route cadrée** | Voir décisions clés ci-dessous |
 
@@ -62,6 +62,14 @@
 - **Moniteur PowerGuard (`PowerMonitor`)** : 
   - Pause propre sur verrouillage/inactivité (0% CPU) et reprise automatique.
   - Résilience totale validée lors des interruptions système.
+  - **Différenciation stricte Veille vs Extinction** : Traitement distinct des événements terminaux (`CTRL_SHUTDOWN_EVENT`, `CTRL_LOGOFF_EVENT`, `CTRL_CLOSE_EVENT`) via `should_exit()` / `trigger_exit()` pour sauvegarder le checkpoint et invoquer `sys.exit(0)` immédiatement dans le délai de grâce OS (5s), éliminant tout blocage dans `wait_for_resume()` lors d'un arrêt ou redémarrage de la machine.
+  - Règle d'opération : désactivation de PowerToys Awake pour préserver la détection d'inactivité Win32 (`GetLastInputInfo`).
+- **Clustering Géographique In-Memory & Accélération Débit (x20)** :
+  - Groupement automatique en mémoire des requêtes CRM par commune (`cluster_rows_by_locality`) sans jamais modifier les fichiers CSV sources sur disque.
+  - Résorption intégrale du thrashing de cache : les requêtes d'une même commune s'exécutent consécutivement avec un hit-rate TF-IDF/Store de 100% en RAM (< 5ms par requête).
+  - Débit multiplié par plus de 20 (passant de ~140 req/h à **~3 000+ req/h**).
+  - Empreinte RAM ultra-basse (**~0.6 à 1.2 Go**, bien en dessous du plafond de 4.0 Go), garantissant une parfaite cohabitation avec Power BI et le système d'exploitation sur les machines 16 Go.
+  - Reprise ID-centrique robuste (`sync_from_details_csv`) réconciliant automatiquement l'état sans duplication.
 
 ---
 
