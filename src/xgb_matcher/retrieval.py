@@ -113,31 +113,59 @@ def _stable_seed(value: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Semantic vector prototypes for public sector / municipal classification
+# Semantic vector prototypes for public sector / municipal / social classification
 # ---------------------------------------------------------------------------
 
 _PUBLIC_SECTOR_PROTOTYPES = [
-    "ecole elementaire primaire maternelle college lycee groupe scolaire enseignement classe",
-    "mairie commune hotel de ville services techniques batiment municipal municipale collectivite communale intercommunale",
-    "gymnase stade piscine municipale complexe sportif salle des fetes dojo terrain sports gymnases",
-    "espace culturel mediatheque bibliotheque centre social ccas cias maison de quartier action sociale communal communale",
-    "halte garderie creche centre aere loisirs enfance jeunesse cantine scolaire periscolaire",
-    "police municipale centre de secours pompiers collectivite territoriale sdis hopital centre hospitalier ch ehpad",
+    # 1. Enseignement & Ecoles
+    "ecole elementaire primaire maternelle college lycee groupe scolaire enseignement classe clis ulis rased",
+    # 2. Collectivités locales & Communes
+    "mairie commune hotel de ville services techniques batiment municipal municipale collectivite communale",
+    # 3. Équipements sportifs & Loisirs communaux
+    "gymnase stade piscine municipale complexe sportif salle des fetes dojo terrain sports gymnases hall des sports",
+    # 4. Culture & Social communal
+    "espace culturel mediatheque bibliotheque centre social ccas cias maison de quartier action sociale communal communale tiers lieu municipal",
+    # 5. Petite enfance & Périscolaire
+    "halte garderie creche centre aere loisirs enfance jeunesse cantine scolaire periscolaire relais petite enfance rpe",
+    # 6. Secours, Sécurité & Hôpitaux publics
+    "police municipale centre de secours pompiers collectivite territoriale sdis hopital centre hospitalier ch ehpad chu samu",
+    # 7. Intercommunalités & Territoires (Grand Reims, communautés de communes...)
+    "communaute urbaine grand reims communaute de communes communaute d agglomeration metropole epci syndicat mixte pays canton intercommunal territorial agglomeration",
+    # 8. Logement social & Bailleurs publics (OPH, HLM...)
+    "hlm office public de l habitat oph bailleur social office public d amenagement logement social cite jardin residence sociale habitat public",
+    # 9. Emploi & Organismes sociaux (Pôle Emploi / France Travail, CAF, CPAM...)
+    "pole emploi france travail anpe agence pour l emploi demandeur d emploi caisse d allocations familiales caf cpam carsat urssaf secu securite sociale msa cnamts cnav",
+    # 10. Départements & Régions (Conseils départementaux, voirie...)
+    "departement conseil departemental conseil regional region hotel du departement services departementaux college public voirie departementale circonspection d action sociale",
+    # 11. Santé mentale ambulatoire & Médico-social (CATTP, CMP...)
+    "cattp cmp cmpp hopital de jour psychiatrique pedopsychiatrie centre medico psychologique csapa caarud fam mas ehpad ime itep esat sessad foyer d accueil medicalise foyer de vie",
+    # 12. Enseignement Supérieur, Recherche & Grands corps (CNAM...)
+    "cnam conservatoire national des arts et metiers universite faculte cfa epe rectorat academie inspe iut crous cnrs inserm inrae",
 ]
 _PUBLIC_VECTORIZER = None
 _PUBLIC_PROTO_MAT = None
 
 
 _PRIVATE_BUSINESS_TERMS = {
-    "sarl", "sas", "eurl", "snc", "sci", "sa", "garage", "boulangerie", "boucherie",
-    "restaurant", "hotel", "coiffure", "bar", "brasserie", "cafe", "boutique",
+    "sarl", "sas", "eurl", "snc", "sci", "garage", "boulangerie", "boucherie",
+    "restaurant", "coiffure", "bar", "brasserie", "cafe", "boutique",
     "salon", "auto", "imprimerie", "carrosserie", "optique", "pharmacie", "press",
-    "pressing", "commercial", "societe", "entreprise", "holding", "cabinet"
+    "pressing", "commercial", "societe", "entreprise", "holding",
+}
+
+_PUBLIC_COMPOUNDS = {
+    "hotel de ville", "hotel du departement", "hotel de region", "hotel de communaute",
+}
+
+
+_PUBLIC_ACRONYMS = {
+    "hlm", "oph", "cattp", "cmp", "cmpp", "ccas", "cias", "sdis",
+    "caf", "cpam", "carsat", "urssaf", "cnam", "crous", "epci",
 }
 
 
 def _is_public_sector_query(text: str) -> bool:
-    """Classify via semantic vector prototype if query relates to public/municipal services."""
+    """Classify via semantic vector prototype if query relates to public/municipal/social services."""
     global _PUBLIC_VECTORIZER, _PUBLIC_PROTO_MAT
     if not text:
         return False
@@ -145,8 +173,14 @@ def _is_public_sector_query(text: str) -> bool:
     # Normalize punctuation into whitespace for token checks
     clean_text = "".join(ch if ch.isalnum() else " " for ch in text.lower())
     tokens = set(clean_text.split())
-    if tokens & _PRIVATE_BUSINESS_TERMS:
+
+    # Protect compounds like 'hotel de ville' from being discarded by generic 'hotel'
+    is_compound_public = any(comp in clean_text for comp in _PUBLIC_COMPOUNDS)
+    if not is_compound_public and (tokens & _PRIVATE_BUSINESS_TERMS):
         return False
+
+    if tokens & _PUBLIC_ACRONYMS:
+        return True
 
     if _PUBLIC_VECTORIZER is None:
         from sklearn.feature_extraction.text import TfidfVectorizer
@@ -157,7 +191,7 @@ def _is_public_sector_query(text: str) -> bool:
     try:
         q_vec = _PUBLIC_VECTORIZER.transform([clean_text])
         sims = cosine_similarity(q_vec, _PUBLIC_PROTO_MAT)[0]
-        return float(max(sims)) >= 0.15
+        return float(max(sims)) >= 0.12
     except Exception:
         return False
 
@@ -454,7 +488,8 @@ def build_candidate_pool(
     # Step 3: Universal rescue whitelist (addr_hash with density guard + numeric tokens + public expansion)
     whitelisted_sirets: set[str] = set()
     if pool_list:
-        # 3a. Address rescue with density guard (<= address_density_cap, default 5)
+        # 3a. Address rescue with density guard
+        # Universal density cap: 10 if exact street number is present, 5 otherwise
         addr_index = build_address_hash_index(pool_list)
         num_index = build_numeric_token_index(pool_list)
 
@@ -464,9 +499,12 @@ def build_candidate_pool(
         )
         if config.rescue_addr_hash and addr_h and addr_index:
             matching_indices = addr_index.get(addr_h, [])
-            # Density Guard: Only rescue if co-tenants <= address_density_cap (default 5)
-            # Avoids flooding with dozens of shell companies from business centers / domiciliation
-            if matching_indices and len(matching_indices) <= config.address_density_cap:
+            # Density Guard: Only rescue if co-tenants <= effective cap
+            # Allows up to 10 when exact street number is provided (universal multi-tenant support)
+            # Restricts to 5 when street number is missing (protects against entire street explosion)
+            has_street_num = bool(crm_pre.get("crm_street_num"))
+            eff_cap = config.address_density_cap if has_street_num else min(5, config.address_density_cap)
+            if matching_indices and len(matching_indices) <= eff_cap:
                 for idx in matching_indices:
                     if idx < len(pool_list):
                         siret = str(pool_list[idx].get("siret") or "")
@@ -483,12 +521,15 @@ def build_candidate_pool(
                         if siret:
                             whitelisted_sirets.add(siret)
 
-        # 3c. Public sector expansion (secondary establishments of local commune/public authorities)
+        # 3c. Public & social sector expansion (secondary establishments of local commune/public authorities/social landlords)
         if config.rescue_public_expansion and _is_public_sector_query(crm_name):
             for cand in pool_list:
                 cj = str(cand.get("cj_ul") or "")
-                # Public sector legal entities: cj_ul starting with '7' (collectivités, EPA, etc.)
-                if cj.startswith("7"):
+                # Public sector & social housing legal entities:
+                # - cj_ul starting with '7' (Collectivités territoriales, EPA, EPS, EPLE, administrations)
+                # - cj_ul starting with '41' (Établissements publics locaux à caractère industriel ou commercial, ex: 4140 OPH)
+                # - cj_ul in ('9220', '9230') (Associations reconnues d'utilité publique / médico-sociales)
+                if cj.startswith("7") or cj.startswith("41") or cj in ("9220", "9230"):
                     siret = str(cand.get("siret") or "")
                     if siret:
                         whitelisted_sirets.add(siret)

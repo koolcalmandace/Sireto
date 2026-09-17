@@ -57,7 +57,7 @@ class RetrievalConfigV1:
     rescue_addr_hash: bool = True
     rescue_numeric_tokens: bool = True
     rescue_public_expansion: bool = True
-    address_density_cap: int = 5
+    address_density_cap: int = 10
 
     # Mega-communes policy
     mega_insee_max_rows: int = 100_000
