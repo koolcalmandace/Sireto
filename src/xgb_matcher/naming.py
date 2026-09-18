@@ -328,6 +328,9 @@ def candidate_tfidf_text(cand: dict) -> str:
             if nm.text and nm.text not in seen:
                 seen.add(nm.text)
                 parts.append(nm.text)
+                # Boost commercial signboards (enseignes) and acronyms (sigles)
+                if nm.source in (NameSource.ETAB_ENSEIGNE, NameSource.ETAB_ENSEIGNE_X, NameSource.UL_SIGLE):
+                    parts.append(nm.text)
         text = " ".join(parts)
 
     if isinstance(cand, dict):

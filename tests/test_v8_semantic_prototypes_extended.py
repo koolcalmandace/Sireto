@@ -90,4 +90,38 @@ def test_intercommunal_and_syndicats_mixtes():
     assert _is_public_sector_query("SIVOM DE LA REGION DE BAUGE") is True
     assert _is_public_sector_query("SIVU SCOLAIRE") is True
     assert _is_public_sector_query("PETR PAYS D ARTOIS") is True
+    assert _is_public_sector_query("EPE DAUDET") is True
+    assert _is_public_sector_query("SDIS DE L AISNE") is True
+
+
+def test_legal_corporate_stopwords():
+    from src.xgb_matcher.blocking import build_tfidf_index, LEGAL_CORPORATE_STOPWORDS
+    candidates = [
+        {"siret": "11111111100011", "denomination": "SOCIETE DE SERVICES ET DISTRIBUTION ALPHA"},
+        {"siret": "22222222200022", "denomination": "HOLDING CONSEIL ET PARTICIPATIONS BETA"},
+        {"siret": "33333333300033", "denomination": "BALLANDE ASSOCIE"},
+    ]
+    vec, mat, names = build_tfidf_index(candidates)
+    assert vec is not None
+    feature_names = set(vec.get_feature_names_out())
+    # Generic legal words must not be indexed as standalone distinctive features
+    for stopword in ["SOCIETE", "SERVICES", "HOLDING", "PARTICIPATIONS", "CONSEIL", "DISTRIBUTION"]:
+        assert stopword not in feature_names
+    # Distinctive words must be preserved
+    assert "ALPHA" in feature_names or any("ALPHA" in f for f in feature_names)
+    assert "BALLANDE" in feature_names or any("BALLANDE" in f for f in feature_names)
+
+
+def test_enseigne_priority_in_tfidf_text():
+    from src.xgb_matcher.naming import candidate_tfidf_text
+    cand = {
+        "enseigne1": "ADAPA",
+        "denomination_ul": "ASSOCIATION DEPARTEMENTALE D AIDE AUX PERSONNES DE L AIN",
+    }
+    tfidf_text = candidate_tfidf_text(cand)
+    tokens = tfidf_text.split()
+    # Commercial signboard 'ADAPA' must be boosted and appear with higher term frequency
+    assert tokens.count("ADAPA") == 2
+    assert "ASSOCIATION" in tokens
+
 

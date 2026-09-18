@@ -158,13 +158,14 @@ _PUBLIC_COMPOUNDS = {
     "syndicat mixte", "syndicats mixtes", "e collectivites", "e collectivite",
     "communaute de communes", "communaute d agglomeration", "communaute urbaine",
     "conseil departemental", "conseil regional", "pole metropolitain",
+    "centre hospitalier", "finances publiques", "tresorerie", "action sociale",
 }
 
 
 _PUBLIC_ACRONYMS = {
-    "hlm", "oph", "cattp", "cmp", "cmpp", "ccas", "cias", "sdis",
+    "hlm", "oph", "cattp", "cmp", "cmpp", "ccas", "cias", "sdis", "sdiss",
     "caf", "cpam", "carsat", "urssaf", "cnam", "crous", "epci",
-    "sm", "sivom", "sivu", "petr",
+    "sm", "sivom", "sivu", "petr", "epe", "ogec", "cfa", "mfr", "csapa", "caarud",
 }
 
 
@@ -529,11 +530,12 @@ def build_candidate_pool(
         if config.rescue_public_expansion and _is_public_sector_query(crm_name):
             for cand in pool_list:
                 cj = str(cand.get("cj_ul") or "")
-                # Public sector & social housing legal entities:
+                # Public sector, social security & social housing legal entities:
                 # - cj_ul starting with '7' (Collectivités territoriales, EPA, EPS, EPLE, administrations)
                 # - cj_ul starting with '41' (Établissements publics locaux à caractère industriel ou commercial, ex: 4140 OPH)
-                # - cj_ul in ('9220', '9230') (Associations reconnues d'utilité publique / médico-sociales)
-                if cj.startswith("7") or cj.startswith("41") or cj in ("9220", "9230"):
+                # - cj_ul starting with '84' or '85' (Sécurité Sociale, CAF, CPAM, URSSAF, CARSAT, régimes sociaux)
+                # - cj_ul in ('9210', '9220', '9230') (Associations reconnues d'utilité publique, médico-sociales, enseignement)
+                if cj.startswith("7") or cj.startswith("41") or cj.startswith("84") or cj.startswith("85") or cj in ("9210", "9220", "9230"):
                     siret = str(cand.get("siret") or "")
                     if siret:
                         whitelisted_sirets.add(siret)

@@ -28,6 +28,16 @@ STREET_STOPWORDS: Set[str] = {
     "ROUTE", "RTE", "QUAI", "SENTIER", "ZA", "ZI", "ZAC",
 }
 
+# Generic corporate and legal stopwords to prevent candidate eviction in large metropolises
+LEGAL_CORPORATE_STOPWORDS: Set[str] = {
+    "SARL", "SAS", "SASA", "EURL", "SA", "SCI", "SNC", "SELARL", "SCP", "EIRL", "GIE",
+    "ETS", "ETBL", "STE", "STES", "SOC", "SOCIETE", "SOCIETES", "ENTREPRISE", "ENTREPRISES",
+    "HOLDING", "HOLDINGS", "PARTICIPATIONS", "PARTICIPATION", "SERVICES", "SERVICE",
+    "CABINET", "CABINETS", "CONSEIL", "CONSEILS", "CONSULTING",
+    "GROUPE", "GROUPES", "COMMERCE", "COMMERCIAL", "DISTRIBUTION", "GESTION",
+}
+
+
 _TFIDF_PUNCT_RE = re.compile(r"[^\w\s]")
 
 
@@ -262,6 +272,7 @@ def build_tfidf_index(
             token_pattern=r"(?u)\b\w+\b",
             min_df=1,
             norm=None,  # type: ignore[arg-type]
+            stop_words=list(LEGAL_CORPORATE_STOPWORDS),
         )
         matrix = vectorizer.fit_transform(names)
         return vectorizer, matrix, names
