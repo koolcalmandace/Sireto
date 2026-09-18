@@ -39,17 +39,23 @@ MISSING_DEPARTMENTS = ["25", "26", "31", "33", "38", "39", "45", "60", "70", "71
 def _safe_move_dir(src: Path | str, dst: Path | str) -> None:
     src = Path(src)
     dst = Path(dst)
-    if dst.exists():
-        shutil.rmtree(dst)
-    try:
-        shutil.move(str(src), str(dst))
-    except Exception:
-        time.sleep(0.5)
+    for attempt in range(5):
         try:
+            if dst.exists():
+                shutil.rmtree(dst, ignore_errors=True)
             shutil.move(str(src), str(dst))
+            return
         except Exception:
-            shutil.copytree(str(src), str(dst))
-            shutil.rmtree(str(src), ignore_errors=True)
+            time.sleep(0.5 * (attempt + 1))
+            try:
+                shutil.copytree(str(src), str(dst), dirs_exist_ok=True)
+                shutil.rmtree(str(src), ignore_errors=True)
+                return
+            except Exception:
+                if attempt == 4:
+                    raise
+                time.sleep(0.5)
+
 
 
 def repair_department(
