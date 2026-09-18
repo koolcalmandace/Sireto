@@ -426,8 +426,8 @@ def extract_street_name_from_address(addr: str | None) -> str:
     if not addr:
         return ""
     addr_str = normalize_text(addr)
-    # Remove leading number and any bis/ter suffix
-    cleaned = re.sub(r"^\d+\s*(BIS|TER|QUATER|B|T|Q)?\s*", "", addr_str, flags=re.IGNORECASE)
+    # Remove leading number and any bis/ter suffix with word boundary protection
+    cleaned = re.sub(r"^\d+\s*(?:BIS|TER|QUATER|[BTQ])?\b\s*", "", addr_str, flags=re.IGNORECASE)
     return cleaned.strip()
 
 

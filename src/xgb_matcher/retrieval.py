@@ -129,14 +129,14 @@ _PUBLIC_SECTOR_PROTOTYPES = [
     "halte garderie creche centre aere loisirs enfance jeunesse cantine scolaire periscolaire relais petite enfance rpe",
     # 6. Secours, Sécurité & Hôpitaux publics
     "police municipale centre de secours pompiers collectivite territoriale sdis hopital centre hospitalier ch ehpad chu samu",
-    # 7. Intercommunalités & Territoires (Grand Reims, communautés de communes...)
-    "communaute urbaine grand reims communaute de communes communaute d agglomeration metropole epci syndicat mixte pays canton intercommunal territorial agglomeration",
+    # 7. Intercommunalités & Territoires (Grand Reims, communautés de communes, syndicats mixtes...)
+    "communaute urbaine grand reims communaute de communes communaute d agglomeration metropole epci syndicat mixte syndicats mixtes sm e collectivites pays canton intercommunal territorial agglomeration sivom sivu petr poles territoriaux",
     # 8. Logement social & Bailleurs publics (OPH, HLM...)
     "hlm office public de l habitat oph bailleur social office public d amenagement logement social cite jardin residence sociale habitat public",
     # 9. Emploi & Organismes sociaux (Pôle Emploi / France Travail, CAF, CPAM...)
     "pole emploi france travail anpe agence pour l emploi demandeur d emploi caisse d allocations familiales caf cpam carsat urssaf secu securite sociale msa cnamts cnav",
-    # 10. Départements & Régions (Conseils départementaux, voirie...)
-    "departement conseil departemental conseil regional region hotel du departement services departementaux college public voirie departementale circonspection d action sociale",
+    # 10. Départements & Régions (Conseils départementaux, régionaux, voirie...)
+    "departement departements conseil departemental conseils departementaux conseil regional conseils regionaux region regions hotel du departement services departementaux college public voirie departementale circonspection d action sociale",
     # 11. Santé mentale ambulatoire & Médico-social (CATTP, CMP...)
     "cattp cmp cmpp hopital de jour psychiatrique pedopsychiatrie centre medico psychologique csapa caarud fam mas ehpad ime itep esat sessad foyer d accueil medicalise foyer de vie",
     # 12. Enseignement Supérieur, Recherche & Grands corps (CNAM...)
@@ -155,12 +155,16 @@ _PRIVATE_BUSINESS_TERMS = {
 
 _PUBLIC_COMPOUNDS = {
     "hotel de ville", "hotel du departement", "hotel de region", "hotel de communaute",
+    "syndicat mixte", "syndicats mixtes", "e collectivites", "e collectivite",
+    "communaute de communes", "communaute d agglomeration", "communaute urbaine",
+    "conseil departemental", "conseil regional", "pole metropolitain",
 }
 
 
 _PUBLIC_ACRONYMS = {
     "hlm", "oph", "cattp", "cmp", "cmpp", "ccas", "cias", "sdis",
     "caf", "cpam", "carsat", "urssaf", "cnam", "crous", "epci",
+    "sm", "sivom", "sivu", "petr",
 }
 
 

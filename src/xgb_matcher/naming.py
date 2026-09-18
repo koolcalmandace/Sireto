@@ -254,9 +254,12 @@ def build_candidate_names(cand: dict) -> List[CandidateName]:
         person_fullname = " ".join(filter(None, [cand.get("prenom_usuel_ul"), cand.get("nom_ul")]))
 
     # On n'inclut les noms de personnes que si la CJ UL correspond à une personne physique / EI
-    cj_ul = cand.get("cj_ul")
-    if cj_ul in PERSON_UL_CODES and person_fullname:
+    cj_ul_str = str(cand.get("cj_ul") or "").strip()
+    if cj_ul_str in PERSON_UL_CODES and person_fullname:
+        # Add full name and individual last name for flexible matching
         add(person_fullname, NameSource.PERSON_NAME, is_ul=True, is_sigle=False)
+        if cand.get("nom_ul") and str(cand.get("nom_ul")).strip() != person_fullname:
+            add(cand.get("nom_ul"), NameSource.PERSON_NAME, is_ul=True, is_sigle=False)
 
     if isinstance(cand, dict):
         cand["_xgb_cached_candidate_names"] = names
