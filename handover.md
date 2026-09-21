@@ -38,6 +38,11 @@
 3. **Règle d'Or de Réentraînement ML** :
    - Exclusion stricte de l'entraînement des cas sans Ground Truth dans la partition (pour ne pas biaiser la calibration des scores).
    - Découpage Train/Dev/Test étanche par **`GroupKFold(siren)`** garantissant zéro *data leakage*.
+4. **Gestion des Anciennes Communes & Communes Nouvelles** :
+   - Intégration de la table de passage officielle INSEE (communes déléguées $\rightarrow$ communes nouvelles) comme filet de sécurité pour les nouveaux flux CRM présentant d'anciens codes.
+5. **Gestion Métier des Radiations & Successions d'Entreprises** :
+   - Maintien du seuil de 10 ans : les établissements fermés avant 2016 sont exclus du store pour éviter d'encombrer l'espace de recherche avec des entités éteintes.
+   - *Règle Métier CRM* : Le CRM reflétant un client/service actif bien connecté, une radiation SIRENE signale généralement une reprise/transmission de fonds, un changement de raison sociale sous le même nom/adresse, ou un déménagement. Le système privilégie la détection de l'établissement actif successeur (via l'adresse et le fallback Places) plutôt que le rattachement à un SIRET juridiquement éteint.
 
 ---
 
