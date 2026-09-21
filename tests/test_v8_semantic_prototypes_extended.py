@@ -125,3 +125,75 @@ def test_enseigne_priority_in_tfidf_text():
     assert "ASSOCIATION" in tokens
 
 
+def test_expanded_public_and_educational_facilities():
+    # Educational facilities & internats
+    assert _is_public_sector_query("INTERNAT IESDA") is True
+    assert _is_public_sector_query("EXTERNAT MEDICO-PEDAGOGIQUE") is True
+    assert _is_public_sector_query("SEGPA DU COLLEGE PASTEUR") is True
+    assert _is_public_sector_query("CANTINE SCOLAIRE MUNICIPALE") is True
+    assert _is_public_sector_query("CENTRE SOCIO-CULTUREL LA BLAISERIE") is True
+
+    # Municipal infrastructure & presbytères
+    assert _is_public_sector_query("PRESBYTERE") is True
+    assert _is_public_sector_query("CIMETIERE MUNICIPAL") is True
+    assert _is_public_sector_query("SERVICES TECHNIQUES MUNICIPAUX") is True
+    assert _is_public_sector_query("CENTRE TECHNIQUE MUNICIPAL") is True
+
+    # Medicosocial & disability with alphanumeric fused codes
+    assert _is_public_sector_query("ADAPA01-BOURG EN BRESSE") is True
+    assert _is_public_sector_query("Codes 06") is True
+    assert _is_public_sector_query("APAJH 44") is True
+    assert _is_public_sector_query("ADAPEI DU DOUBS") is True
+
+    # Territorial administration & youth justice
+    assert _is_public_sector_query("DIRECTION TERRITORIALE PROTECTION JUDICIAIRE JEUNESSE") is True
+    assert _is_public_sector_query("DTPJJ TOULOUSE") is True
+    assert _is_public_sector_query("DSDEN DE LA DORDOGNE") is True
+
+
+def test_communal_secondary_establishment_whitelisting():
+    """Verify that secondary municipal establishments (e.g. schools, gyms, presbytères)
+
+    are 100% whitelisted into the candidate pool when a public facility query is matched,
+    preventing any TF-IDF pruning on zero-word lexical overlap.
+    """
+    store = PartitionedCandidateStore(Path("data/candidates_v8_national"))
+    config = RetrievalConfigV1(
+        rescue_public_expansion=True,
+        prefilter_k=500,
+    )
+
+    # CRM Query: Ecole Primaire Jules Ferry in Ronchin (59507)
+    # GT SIRET: 21590507600018 (Commune de Ronchin)
+    crm_row = {
+        "crm_id": "102668",
+        "crm_name": "ECOLE PRIMAIRE JULES FERRY",
+        "crm_address": "69 RUE DU GENERAL LECLERC",
+        "crm_city": "RONCHIN",
+        "postcode": "59790",
+        "insee": "59507",
+    }
+    gt_siret = "21590507600018"
+    crm_pre = preprocess_crm_row(crm_row)
+    tfidf_cache = {}
+
+    res = build_candidate_pool(
+        store=store,
+        crm_row=crm_row,
+        crm_pre=crm_pre,
+        config=config,
+        tfidf_cache=tfidf_cache,
+        gt_siret=gt_siret,
+        compute_idf_map=False,
+    )
+
+    # Base pool has candidates
+    assert res.gt_in_base_pool is True
+    # The communal secondary establishment must be in the candidate pool for XGBoost
+    assert res.gt_in_tfidf_pool is True
+    assert res.loss_reason is None or res.loss_reason == ""
+    # Verify the GT SIRET is physically present in candidates
+    candidate_sirets = {str(c.get("siret") or "") for c in res.candidates}
+    assert gt_siret in candidate_sirets
+
+

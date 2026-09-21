@@ -13,6 +13,7 @@ import logging
 from dataclasses import dataclass, field
 import hashlib
 import random
+import re
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 from .partitioned_store import PartitionedCandidateStore
@@ -118,13 +119,13 @@ def _stable_seed(value: str) -> int:
 
 _PUBLIC_SECTOR_PROTOTYPES = [
     # 1. Enseignement & Ecoles
-    "ecole elementaire primaire maternelle college lycee groupe scolaire enseignement classe clis ulis rased",
+    "ecole elementaire primaire maternelle college lycee groupe scolaire enseignement classe clis ulis rased internat externat pedagogique medico pedagogique segpa erea cantine scolaire periscolaire",
     # 2. Collectivités locales & Communes
-    "mairie commune hotel de ville services techniques batiment municipal municipale collectivite communale",
+    "mairie commune hotel de ville services techniques batiment municipal municipale collectivite communale presbytere cimetiere centre technique municipal salle des fetes salle polyvalente foyer rural ateliers municipaux assainissement",
     # 3. Équipements sportifs & Loisirs communaux
     "gymnase stade piscine municipale complexe sportif salle des fetes dojo terrain sports gymnases hall des sports",
     # 4. Culture & Social communal
-    "espace culturel mediatheque bibliotheque centre social ccas cias maison de quartier action sociale communal communale tiers lieu municipal",
+    "espace culturel mediatheque bibliotheque centre social ccas cias maison de quartier action sociale communal communale tiers lieu municipal centre socio culturel foyer rural",
     # 5. Petite enfance & Périscolaire
     "halte garderie creche centre aere loisirs enfance jeunesse cantine scolaire periscolaire relais petite enfance rpe",
     # 6. Secours, Sécurité & Hôpitaux publics
@@ -137,10 +138,12 @@ _PUBLIC_SECTOR_PROTOTYPES = [
     "pole emploi france travail anpe agence pour l emploi demandeur d emploi caisse d allocations familiales caf cpam carsat urssaf secu securite sociale msa cnamts cnav",
     # 10. Départements & Régions (Conseils départementaux, régionaux, voirie...)
     "departement departements conseil departemental conseils departementaux conseil regional conseils regionaux region regions hotel du departement services departementaux college public voirie departementale circonspection d action sociale",
-    # 11. Santé mentale ambulatoire & Médico-social (CATTP, CMP...)
-    "cattp cmp cmpp hopital de jour psychiatrique pedopsychiatrie centre medico psychologique csapa caarud fam mas ehpad ime itep esat sessad foyer d accueil medicalise foyer de vie",
+    # 11. Santé mentale ambulatoire, Handicap & Médico-social (CATTP, CMP, APAJH, ADAPA...)
+    "cattp cmp cmpp hopital de jour psychiatrique pedopsychiatrie centre medico psychologique csapa caarud fam mas ehpad ime itep esat sessad foyer d accueil medicalise foyer de vie adapa apajh adapei iesda unapei codes medico pedagogique pedagogique",
     # 12. Enseignement Supérieur, Recherche & Grands corps (CNAM...)
     "cnam conservatoire national des arts et metiers universite faculte cfa epe rectorat academie inspe iut crous cnrs inserm inrae",
+    # 13. Direction territoriale, Action éducative & Judiciaire (PJJ, DTPJJ, SDJES...)
+    "direction territoriale protection judiciaire jeunesse pjj dtpjj sdjes dsden rectorat education nationale",
 ]
 _PUBLIC_VECTORIZER = None
 _PUBLIC_PROTO_MAT = None
@@ -159,6 +162,11 @@ _PUBLIC_COMPOUNDS = {
     "communaute de communes", "communaute d agglomeration", "communaute urbaine",
     "conseil departemental", "conseil regional", "pole metropolitain",
     "centre hospitalier", "finances publiques", "tresorerie", "action sociale",
+    "centre socio culturel", "centre socioculturel", "centre technique municipal",
+    "services techniques", "ateliers municipaux", "police municipale",
+    "salle des fetes", "salle polyvalente", "foyer rural",
+    "protection judiciaire de la jeunesse", "protection judiciaire jeunesse",
+    "direction territoriale", "jeunesse et sports", "direction des services departementaux",
 }
 
 
@@ -166,6 +174,9 @@ _PUBLIC_ACRONYMS = {
     "hlm", "oph", "cattp", "cmp", "cmpp", "ccas", "cias", "sdis", "sdiss",
     "caf", "cpam", "carsat", "urssaf", "cnam", "crous", "epci",
     "sm", "sivom", "sivu", "petr", "epe", "ogec", "cfa", "mfr", "csapa", "caarud",
+    "adapa", "apajh", "adapei", "iesda", "unapei", "esat", "ime", "itep", "sessad",
+    "mas", "fam", "pjj", "dtpjj", "sdjes", "dsden", "rectorat", "codes",
+    "presbytere", "cimetiere", "internat", "externat",
 }
 
 
@@ -175,8 +186,11 @@ def _is_public_sector_query(text: str) -> bool:
     if not text:
         return False
 
-    # Normalize punctuation into whitespace for token checks
+    # Normalize punctuation into whitespace and de-concatenate alphanumeric tokens (e.g. ADAPA01 -> ADAPA 01)
     clean_text = "".join(ch if ch.isalnum() else " " for ch in text.lower())
+    clean_text = re.sub(r"([a-z]+)(\d+)", r"\1 \2", clean_text)
+    clean_text = re.sub(r"(\d+)([a-z]+)", r"\1 \2", clean_text)
+    clean_text = re.sub(r"\s+", " ", clean_text).strip()
     tokens = set(clean_text.split())
 
     # Protect compounds like 'hotel de ville' from being discarded by generic 'hotel'
@@ -528,14 +542,37 @@ def build_candidate_pool(
 
         # 3c. Public & social sector expansion (secondary establishments of local commune/public authorities/social landlords)
         if config.rescue_public_expansion and _is_public_sector_query(crm_name):
+            # 1. Identify local Commune SIREN(s) in the locality pool
+            commune_sirens: set[str] = set()
             for cand in pool_list:
                 cj = str(cand.get("cj_ul") or "")
-                # Public sector, social security & social housing legal entities:
+                denom = str(cand.get("denomination") or cand.get("denomination_ul") or "").upper()
+                if cj == "7210" or denom.startswith(("COMMUNE DE ", "COMMUNE D ", "VILLE DE ", "MAIRIE DE ", "MAIRIE D ")):
+                    s = str(cand.get("siren") or "")
+                    if s:
+                        commune_sirens.add(s)
+
+            for cand in pool_list:
+                cj = str(cand.get("cj_ul") or "")
+                siren = str(cand.get("siren") or "")
+
+                # A. Any secondary establishment of the local Commune (schools, gymnasiums, municipal annexes, presbytères):
+                is_commune_child = (cj == "7210") or (bool(siren) and siren in commune_sirens)
+
+                # B. Public sector, social security & social housing legal entities:
                 # - cj_ul starting with '7' (Collectivités territoriales, EPA, EPS, EPLE, administrations)
                 # - cj_ul starting with '41' (Établissements publics locaux à caractère industriel ou commercial, ex: 4140 OPH)
                 # - cj_ul starting with '84' or '85' (Sécurité Sociale, CAF, CPAM, URSSAF, CARSAT, régimes sociaux)
                 # - cj_ul in ('9210', '9220', '9230') (Associations reconnues d'utilité publique, médico-sociales, enseignement)
-                if cj.startswith("7") or cj.startswith("41") or cj.startswith("84") or cj.startswith("85") or cj in ("9210", "9220", "9230"):
+                is_public_org = (
+                    cj.startswith("7")
+                    or cj.startswith("41")
+                    or cj.startswith("84")
+                    or cj.startswith("85")
+                    or cj in ("9210", "9220", "9230")
+                )
+
+                if is_commune_child or is_public_org:
                     siret = str(cand.get("siret") or "")
                     if siret:
                         whitelisted_sirets.add(siret)
