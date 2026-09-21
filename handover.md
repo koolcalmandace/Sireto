@@ -1,6 +1,6 @@
-# SIRETO Active Handover Cockpit — 18 Septembre 2026
+# SIRETO Active Handover Cockpit — 21 Septembre 2026
 
-**Branche active** : `feature/tfidf-metropole-stopwords-and-enseigne-priority` (issue de `feature/tfidf-semantic-prototypes-and-partition-completion`)  
+**Branche active** : `feature/retrieval-public-communal-whitelisting` (issue de `feature/tfidf-metropole-stopwords-and-enseigne-priority`)  
 **Phase courante** : [Phase 3b : Prototypes Sémantiques TF-IDF & Complétion Partitions V8](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/history/phase3_geo_resolution_and_crm_expansion.md)  
 **Cartographie documentaire complète** : [docs/INDEX.md](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/INDEX.md)
 
@@ -17,7 +17,8 @@
 | **Étape 5** | **Store National V8 & Nouvelles Règles de Retrieval** | ✅ **Validée (70.14% / +3 859 requêtes)** | [`geo_benchmark_v8_recovery_5502_summary.json`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/reports/geo_validation/geo_benchmark_v8_recovery_5502_summary.json), [`analysis_step5_v8_recovery_5502.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/analysis/analysis_step5_v8_recovery_5502.md) *(commit `c77793b`)* |
 | **Étape 5b**| **Prototypes Sémantiques Étendus & Réparation Partitions** | ✅ **Validée (88.59% Top-500 / 97.55% Base Pool)** | [`geo_benchmark_v8_recovery_enhanced_summary.json`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/reports/geo_validation/geo_benchmark_v8_recovery_enhanced_summary.json), [`analysis_step5b_v8_recovery_enhanced.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/analysis/analysis_step5b_v8_recovery_enhanced.md), [`repair_missing_v8_departments.py`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/scripts/repair_missing_v8_departments.py), [`retrieval.py`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/src/xgb_matcher/retrieval.py) *(commits `f386cd0`, `c99126b`)* |
 | **Étape 5c**| **Résolution des Dernières Partitions (Dpt 24, 66...) & Validation Finale 99%** | 🔄 **En cours (Objectif >= 99%)** | Départements 66 (Perpignan : 62 948 étab.) et 24 (Dordogne : 505 communes) restaurés avec succès (+48 cas récupérés sur les 135 manquants, Base Pool atteignant 98.42%). Certification finale sur 32k requêtes en cours. *(commits `2ed7874`, `fe88483`)* |
-| **Étape 5d**| **Stopwords Juridiques Métropole & Priorité Enseigne TF-IDF** | ✅ **Implémentée & Testée (100%)** | Élimination de l'éviction en métropole (`LEGAL_CORPORATE_STOPWORDS`), surpondération d'enseigne dans `candidate_tfidf_text`, expansion sécurité sociale (84/85) et médico-sociale (9210) *(commit `95c45b3`)* |
+| **Étape 5d**| **Stopwords Juridiques Métropole & Priorité Enseigne TF-IDF** | ✅ **Implémentée & Testée (100%)** | Élimination de l'éviction en métropole (`LEGAL_CORPORATE_STOPWORDS`), surpondération d'enseigne dans `candidate_tfidf_text`, expansion sécurité sociale (84/85) et médico-sociale (9210) *(commits `95c45b3`, `49be97e`)* |
+| **Étape 5e**| **Whitelisting Établissements Secondaires Communaux & Extension Équipements Publics** | ✅ **Validée (100% Tests Passés)** | Dé-concaténation alphanumérique des requêtes CRM, whitelisting inconditionnel des établissements communaux (`cj_ul == 7210`) sur requêtes publiques (résolution écoles/gymnases/annexes), couverture étendue médico-sociale, scolaire et territoriale *(commit `a7cc1e4`)* |
 | **Étape 6** | **Réentraînement XGBoost v2 (Ranker, Decider, Risk)** | ⏳ **Feuille de route cadrée** | Voir décisions clés ci-dessous |* | ⏳ **Feuille de route cadrée** | Voir décisions clés ci-dessous |
 
 
