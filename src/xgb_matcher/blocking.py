@@ -483,10 +483,13 @@ def build_numeric_token_index(candidates: Iterable[dict]) -> Dict[str, List[int]
 
 
 def normalize_text_for_tfidf(text: str | None) -> str:
-    """Normalize text for TF-IDF with light plural expansion."""
+    """Normalize text for TF-IDF with alphanumeric de-concatenation and light plural expansion."""
     base = normalize_text(text)
     if not base:
         return ""
+    # Sépare systématiquement les chiffres et lettres collés (ex: 'ADAPA01' -> 'ADAPA 01', '75001PARIS' -> '75001 PARIS')
+    base = re.sub(r"([a-zA-Z]+)(\d+)", r"\1 \2", base)
+    base = re.sub(r"(\d+)([a-zA-Z]+)", r"\1 \2", base)
     # Remove punctuation for acronym friendliness, then collapse whitespace.
     base = _TFIDF_PUNCT_RE.sub(" ", base)
     base = " ".join(base.split())

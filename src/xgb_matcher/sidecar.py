@@ -26,13 +26,27 @@ FRENCH_STOPWORDS = {
     "un", "une", "pour", "sur", "sous", "par", "a", "dans", "chez", "s", "sa", "son"
 }
 
+COMMON_FRENCH_WORDS = {
+    "FRANCE", "BOURG", "BRESSE", "PASCAL", "NICE", "ANDRE", "ROCHE", "LOUBET",
+    "COMMERCE", "SOCIETE", "SERVICES", "SERVICE", "CENTRE", "HOTEL", "RELAIS",
+    "ATELIER", "ESPACE", "SAINT", "SAINTE", "NOUVELLE", "EUROPE", "SUD", "NORD",
+    "EST", "OUEST", "VALLEE", "VILLAGE", "VILLE", "ALPES", "ASSOCIE", "ASSOCIES",
+    "NATIONALE", "GENERAL", "GENERALE", "MUTUELLE", "CABINET", "CONSEIL", "EXPERT",
+    "EXPERTISE", "OPERATIONNEL", "INTERNAT", "EXTERNAT", "RAPIDO", "TEQUILA",
+    "JARDIN", "JARDINS", "MAISON", "AGRICOLE", "NATURE", "ENSEMBLE", "FORMATION",
+    "MAGASIN", "MAGASINS", "BOUTIQUE", "BOUTIQUES"
+}
+
 
 def normalize_token(text: str | None) -> str:
-    """Normalize text: lowercase, strip accents, remove non-alphanumeric."""
+    """Normalize text: lowercase, strip accents, de-concatenate alphanumeric, remove non-alphanumeric."""
     if not text:
         return ""
     text = unicodedata.normalize("NFKD", text)
     text = "".join(c for c in text if not unicodedata.combining(c))
+    # De-concatenate alphanumeric: 'ADAPA01' -> 'ADAPA 01', '75001PARIS' -> '75001 PARIS'
+    text = re.sub(r"([A-Za-z]+)(\d+)", r"\1 \2", text)
+    text = re.sub(r"(\d+)([A-Za-z]+)", r"\1 \2", text)
     text = text.lower()
     text = re.sub(r"[^a-z0-9\s]", " ", text)
     return " ".join(text.split())
@@ -41,23 +55,52 @@ def normalize_token(text: str | None) -> str:
 def extract_acronym_candidates(crm_name: str) -> List[str]:
     """
     Extract candidate acronym tokens from CRM name.
-    Target: 3 to 6 uppercase characters (or words that look like acronyms).
+    Handles all-uppercase CRM text safely by distinguishing true acronyms
+    from regular French vocabulary.
     """
     if not crm_name:
         return []
-    
-    # Clean text preserving case
-    raw_tokens = re.findall(r"\b[A-Za-z0-9]{3,6}\b", crm_name)
-    candidates = []
+
+    candidates: List[str] = []
+
+    # 1. Preserve raw alphanumeric codes like 'CTC10' before de-concatenation
+    raw_alnum = re.findall(r"\b([A-Za-z]{2,5}\d{1,3})\b", crm_name)
+    for tok in raw_alnum:
+        candidates.append(tok.upper())
+
+    # 2. Alphanumeric de-concatenation: 'ADAPA01' -> 'ADAPA 01'
+    clean_name = re.sub(r"([A-Za-z]+)(\d+)", r"\1 \2", crm_name)
+    clean_name = re.sub(r"(\d+)([A-Za-z]+)", r"\1 \2", clean_name)
+
+    # 3. Delimited tokens: after dash, in parentheses, brackets, or slashes (e.g. - BFA, (L-ODYSEE))
+    delimited = re.findall(r'[-\(\[\/\"]\s*([A-Za-z]{2,8})\b|\b([A-Za-z]{2,8})\s*[-\)\]\/\"]', clean_name)
+    for g1, g2 in delimited:
+        tok = (g1 or g2).upper()
+        if tok not in COMMON_FRENCH_WORDS and tok.lower() not in FRENCH_STOPWORDS and len(tok) >= 2:
+            candidates.append(tok)
+
+    # 4. Tokens next to digits (e.g. ADAPA 01, MFR 44, CTC 10)
+    digit_prox = re.findall(r'\b([A-Za-z]{2,8})\s+\d+|\d+\s+([A-Za-z]{2,8})\b', clean_name)
+    for g1, g2 in digit_prox:
+        tok = (g1 or g2).upper()
+        if tok not in COMMON_FRENCH_WORDS and tok.lower() not in FRENCH_STOPWORDS and len(tok) >= 2:
+            candidates.append(tok)
+
+    # 5. Consonant-heavy or short uppercase tokens (2 to 6 chars)
+    raw_tokens = re.findall(r"\b[A-Za-z0-9]{2,6}\b", clean_name)
     for tok in raw_tokens:
-        # Must contain at least 2 letters
-        letters = re.findall(r"[A-Za-z]", tok)
-        if len(letters) >= 2:
-            # If all uppercase or alphanumeric code like CTC10, FDEA
-            if tok.isupper() or (tok[:2].isupper() and any(c.isdigit() for c in tok)):
-                norm_tok = normalize_token(tok).replace(" ", "")
-                if norm_tok not in FRENCH_STOPWORDS and len(norm_tok) >= 3:
-                    candidates.append(norm_tok.upper())
+        tok_u = tok.upper()
+        if tok.isalpha() and 2 <= len(tok) <= 6:
+            if tok_u in COMMON_FRENCH_WORDS or tok.lower() in FRENCH_STOPWORDS:
+                continue
+            vowels = sum(1 for c in tok.lower() if c in "aeiouy")
+            # Consonant-heavy (e.g. DSHA, DSB, LHSM, BFA) or short (2-3 chars, e.g. MFR, CEPI)
+            if vowels <= 1 or len(tok) <= 3:
+                candidates.append(tok_u)
+            # Standalone single-word name or first word with all-caps short length
+            elif len(raw_tokens) <= 2:
+                candidates.append(tok_u)
+
     return list(dict.fromkeys(candidates))
 
 
@@ -114,6 +157,15 @@ def match_local_acronyms(
       - Multiple match but exactly 1 shares a street token with crm_address.
     """
     acronyms = extract_acronym_candidates(crm_name)
+    
+    # Also check if any candidate in the local partition has an explicit sigle_ul present in crm_name
+    norm_crm_tokens = set(normalize_token(crm_name).upper().split())
+    for cand in candidates:
+        cand_sigle = normalize_token(str(cand.get("sigle_ul") or "")).upper()
+        if cand_sigle and len(cand_sigle) >= 2 and cand_sigle not in COMMON_FRENCH_WORDS and cand_sigle in norm_crm_tokens:
+            if cand_sigle not in acronyms:
+                acronyms.append(cand_sigle)
+
     if not acronyms or not candidates:
         return set()
 
@@ -141,6 +193,10 @@ def match_local_acronyms(
             # 2. Dynamic initialisms computed on-the-fly
             for name in names_to_check:
                 if not name:
+                    continue
+                # Fast pre-filter: first character must match first letter of acronym or 'L' (leading article)
+                first_char = name.strip()[:1].upper()
+                if first_char != acr[0] and first_char != "L":
                     continue
                 inits_list = compute_initials_variants(name)
                 # Check exact match or prefix match if acronym has 4+ letters
