@@ -786,7 +786,7 @@ def _init_name_feature_defaults() -> Dict[str, float]:
 
 def preprocess_crm_row(crm_row: Mapping[str, Any]) -> Dict[str, Any]:
     """Precompute CRM-side normalizations once per row (for faster inference)."""
-    crm_address_raw = crm_row.get("crm_address", "")
+    crm_address_raw = str(crm_row.get("crm_address") or crm_row.get("crm_adresse") or crm_row.get("adresse") or "")
     crm_address_norm = normalize_street_type(crm_address_raw)
     crm_raw_name = str(crm_row.get("crm_name") or "")
     crm_name = strip_location_from_crm_name(crm_row)
@@ -884,7 +884,7 @@ def make_features_from_preprocessed(
 
     # Street components
     crm_street_num = crm.get("crm_street_num")
-    cand_street_num = cand.get("numeroVoie")
+    cand_street_num = cand.get("numeroVoie") or cand.get("num_voie")
     if cand_street_num:
         cand_street_num = str(cand_street_num)
 
