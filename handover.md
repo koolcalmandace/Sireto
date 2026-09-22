@@ -44,8 +44,16 @@
 4. **Gestion des Anciennes Communes & Communes Nouvelles** :
    - Intégration de la table de passage officielle INSEE (communes déléguées $\rightarrow$ communes nouvelles) comme filet de sécurité pour les nouveaux flux CRM présentant d'anciens codes.
 5. **Gestion Métier des Radiations & Successions d'Entreprises** :
-   - Maintien du seuil de 10 ans : les établissements fermés avant 2016 sont exclus du store pour éviter d'encombrer l'espace de recherche avec des entités éteintes.
+   - Maintien du seuil de 10 ans : les établissements fermés avant 2016 sont exclus du store pour éviter d'encombrer l'espace de recherche avec des entités éteintes (99.4% des fermés non-retrouvés relèvent de ce filtre légitime).
    - *Règle Métier CRM* : Le CRM reflétant un client/service actif bien connecté, une radiation SIRENE signale généralement une reprise/transmission de fonds, un changement de raison sociale sous le même nom/adresse, ou un déménagement. Le système privilégie la détection de l'établissement actif successeur (via l'adresse et le fallback Places) plutôt que le rattachement à un SIRET juridiquement éteint.
+6. **Architecture Généraliste du Sidecar (Double-Ancre Spatiale-Sectorielle — SSDA)** *(Cadrée le 22/09)* :
+   - **Abandon de la stratégie de dictionnaires statiques** (`NATIONAL_FRANCHISE_NETWORKS`), jugée fragile et sujette à surspécialisation.
+   - **Méthode Universelle 100% Déterministe** : Inversion double-ancre reposant exclusivement sur les données natives CRM/SIRENE :
+     - *Ancre Spatiale* : Numéro de voie exact + Jaro voie $\ge 0.85$ (BAN-normalisé).
+     - *Ancre Sectorielle* : Projection vectorielle continue NAF INSEE (via [`naf_vector_engine.py`](src/xgb_matcher/naf_vector_engine.py)).
+     - *Garde d'Exclusivité* : Whitelisting si et seulement si $N_{\text{secteur, adresse}} == 1$ (évite toute collision en centre commercial).
+     - *Réconciliation NAF Holding / Exploitation* : Prise en charge des divergences via Dual-NAF (Établissement vs UL), métaclasse transversale holding (`64.20`, `70.10`, `68.20`), empreinte globale SIREN et liens de gouvernance (`pm_dirigeant_names`).
+     - *Traitement des [ND] (RGPD)* : Résolution native des professionnels libéraux/médicaux masqués via l'exclusivité spatiale + NAF sans nécessiter de chaîne textuelle.
 
 ---
 
