@@ -180,6 +180,7 @@ FEATURE_NAMES: List[str] = [
     "full_addr_match_score",       # weighted address completeness: 0.5*street_name_jaro + 0.3*street_number_match + 0.2*postcode_match
     "name_jaro_vs_enseigne",       # Jaro between CRM name and establishment-level name (enseigne), not UL name
     "name_city_suffix_match",      # ratio of CRM city tokens appearing in candidate enseigne
+    "is_copropriete",              # Syndicate of co-owners indicator (cj_ul == '9110')
 ]
 
 SEMANTIC_FEATURE_NAMES: List[str] = [
@@ -358,27 +359,99 @@ def build_address(cand: dict) -> str:
     return addr_norm
 
 
+# --------------------------------------------------------------------------- #
+# Street type normalization (BAN official nomenclature)
+# --------------------------------------------------------------------------- #
+
+_STREET_TYPE_NORMALIZATION: Dict[str, str] = {
+    "AV": "AVENUE",
+    "BD": "BOULEVARD",
+    "BLVD": "BOULEVARD",
+    "R": "RUE",
+    "RTE": "ROUTE",
+    "IMP": "IMPASSE",
+    "ALL": "ALLEE",
+    "CHE": "CHEMIN",
+    "CRS": "COURS",
+    "PL": "PLACE",
+    "QU": "QUAI",
+    "RES": "RESIDENCE",
+    "SQ": "SQUARE",
+    "ZA": "ZONE ARTISANALE",
+    "ZI": "ZONE INDUSTRIELLE",
+    "ZAC": "ZONE D AMENAGEMENT CONCERTE",
+}
+_STREET_TYPE_REGEX = re.compile(
+    r"\b(" + "|".join(sorted(_STREET_TYPE_NORMALIZATION.keys(), key=len, reverse=True)) + r")\b",
+    re.IGNORECASE,
+)
+
+
+def normalize_street_type(address: str | None) -> str:
+    """Normalize French street type abbreviations according to BAN standard."""
+    if not address:
+        return ""
+    return _STREET_TYPE_REGEX.sub(
+        lambda m: _STREET_TYPE_NORMALIZATION[m.group(0).upper()],
+        str(address),
+    )
+
+
+def parse_street_numbers(num_str: str | None) -> Set[int]:
+    """Parse integer street numbers from a number or range string (e.g. '66-68' -> {66, 68})."""
+    if not num_str:
+        return set()
+    nums: Set[int] = set()
+    for part in re.findall(r"\d+", str(num_str)):
+        try:
+            nums.add(int(part))
+        except ValueError:
+            pass
+    return nums
+
+
 def extract_street_number(addr: str | None) -> str | None:
     """
-    Extract leading street number from address string.
+    Extract street number or number range from address string.
 
-    Uses regex to handle variations like "12", "12B", "12 BIS", etc.
+    Handles:
+      - Ranges like '66-68', '66/68', '66 - 68' -> returns '66-68'
+      - Standard leading numbers like '12', '12B', '12 BIS'
+      - Multi-position numbers when preceded by building/BP prefixes (e.g. 'Batiment B, 14 rue de Paris')
 
     Args:
         addr: Address string
 
     Returns:
-        Street number as string, or None if not found
+        Street number or range string, or None if not found
     """
     if not addr:
         return None
     addr_str = str(addr).strip()
     if not addr_str:
         return None
-    # Match leading digits (optionally followed by letter like "12B")
-    match = re.match(r"^(\d+)", addr_str)
-    if match:
-        return match.group(1)
+
+    # 1. Range check (e.g. '66-68' or '66 - 68' or '66/68')
+    range_match = re.search(r"\b(\d+)\s*[-/]\s*(\d+)\b", addr_str)
+    if range_match:
+        return f"{range_match.group(1)}-{range_match.group(2)}"
+
+    # 2. Leading digits (standard: '12 rue de la Paix', '12B rue...')
+    lead_match = re.match(r"^(\d+)", addr_str)
+    if lead_match:
+        return lead_match.group(1)
+
+    # 3. Clean multi-position fallback (filtering BP, Batiment, Etage, CS, etc.)
+    cleaned = re.sub(
+        r"\b(?:BP|CS|BOITE\s+POSTALE|BATIMENT|BAT|ETAGE|PORTE|LOCAL|IMMEUBLE)\s*[A-Z0-9-]+\b",
+        "",
+        addr_str,
+        flags=re.IGNORECASE,
+    )
+    multi_match = re.search(r"(?<!\d)([1-9]\d{0,3})(?!\d)", cleaned)
+    if multi_match:
+        return multi_match.group(1)
+
     return None
 
 
@@ -453,14 +526,17 @@ def city_match(c1: str | None, c2: str | None) -> int:
 def street_number_diff(n1: str | None, n2: str | None) -> float:
     """
     Compute absolute difference between street numbers.
+    Supports intervals (e.g. '66-68' vs '68' -> 0.0).
 
     Returns 9999.0 if either number is unavailable or invalid.
     """
     try:
-        num1 = int(n1) if n1 else None
-        num2 = int(n2) if n2 else None
-        if num1 is not None and num2 is not None:
-            return float(abs(num1 - num2))
+        nums1 = parse_street_numbers(n1)
+        nums2 = parse_street_numbers(n2)
+        if nums1 and nums2:
+            if nums1 & nums2:
+                return 0.0
+            return float(min(abs(c1 - c2) for c1 in nums1 for c2 in nums2))
         return 9999.0
     except (TypeError, ValueError):
         return 9999.0
@@ -618,12 +694,17 @@ def acronym_match(a: str, b: str) -> int:
     if not a or not b:
         return 0
 
-    # Determine which might be the acronym
-    a_is_acronym = _is_acronym(a.replace(" ", ""))
-    b_is_acronym = _is_acronym(b.replace(" ", ""))
+    norm_a = a.replace(" ", "").upper()
+    norm_b = b.replace(" ", "").upper()
+    a_is_acronym = _is_acronym(norm_a)
+    b_is_acronym = _is_acronym(norm_b)
+
+    # Both are acronyms: exact match (fixes C5 bug where SNCF vs SNCF returned 0)
+    if a_is_acronym and b_is_acronym:
+        return int(norm_a == norm_b)
 
     if a_is_acronym and not b_is_acronym:
-        query_acro = a.replace(" ", "").upper()
+        query_acro = norm_a
         cand_acro = _extract_acronym(b)
         
         # 1. Exact match
@@ -634,7 +715,7 @@ def acronym_match(a: str, b: str) -> int:
             return 1
         return 0
     elif b_is_acronym and not a_is_acronym:
-        query_acro = b.replace(" ", "").upper()
+        query_acro = norm_b
         cand_acro = _extract_acronym(a)
         if query_acro == cand_acro or (len(query_acro) >= 2 and cand_acro.startswith(query_acro)):
             return 1
@@ -706,8 +787,18 @@ def _init_name_feature_defaults() -> Dict[str, float]:
 def preprocess_crm_row(crm_row: Mapping[str, Any]) -> Dict[str, Any]:
     """Precompute CRM-side normalizations once per row (for faster inference)."""
     crm_address_raw = crm_row.get("crm_address", "")
+    crm_address_norm = normalize_street_type(crm_address_raw)
+    crm_raw_name = str(crm_row.get("crm_name") or "")
     crm_name = strip_location_from_crm_name(crm_row)
     crm_city = crm_row.get("crm_city_addr") or crm_row.get("crm_city", "")
+
+    # Multi-representation on delimiters (' - ', ' / ', ' // ') on raw name before hyphens are stripped into spaces
+    crm_name_root = crm_name
+    delim_match = re.search(r"\s+[-/]\s+", crm_raw_name)
+    if delim_match:
+        root_candidate = crm_raw_name[:delim_match.start()].strip()
+        if len(root_candidate) >= 3:
+            crm_name_root = strip_location_from_crm_name({**dict(crm_row), "crm_name": root_candidate})
 
     crm_tokens_all = set(crm_name.split())
     is_crm_school = float(bool(crm_tokens_all & SCHOOL_TOKENS))
@@ -724,12 +815,13 @@ def preprocess_crm_row(crm_row: Mapping[str, Any]) -> Dict[str, Any]:
 
     return {
         "crm_name": crm_name,
+        "crm_name_root": crm_name_root,
         "crm_name_semantic": strip_location_from_crm_name(crm_row, preserve_case=True),
-        "crm_addr": normalize_text(crm_address_raw),
+        "crm_addr": normalize_text(crm_address_norm),
         "crm_city": crm_city,
         "crm_city_norm": normalize_text(crm_city),
         "crm_street_num": extract_street_number(crm_address_raw),
-        "crm_street_name": extract_street_name_from_address(crm_address_raw),
+        "crm_street_name": extract_street_name_from_address(crm_address_norm),
         "postcode": crm_row.get("postcode"),
         "insee": crm_row.get("insee"),
         "aliases": aliases,
@@ -831,10 +923,17 @@ def make_features_from_preprocessed(
             jaro_scores = [jaro_sim(crm_name, nm.text) for nm in candidate_names]
             lev_scores = [levenshtein_norm(crm_name, nm.text) for nm in candidate_names]
 
+        crm_name_root = crm.get("crm_name_root")
+        has_root = bool(crm_name_root and crm_name_root != crm_name)
+
         for idx, nm in enumerate(candidate_names):
             sim_jaro = float(jaro_scores[idx])
             sim_lev = float(lev_scores[idx])
             tok = token_overlap(crm_name, nm.text, stopwords=NAME_STOPWORDS, min_len=2)
+            if has_root:
+                sim_jaro = max(sim_jaro, float(jaro_sim(crm_name_root, nm.text)))
+                sim_lev = max(sim_lev, float(levenshtein_norm(crm_name_root, nm.text)))
+                tok = max(tok, float(token_overlap(crm_name_root, nm.text, stopwords=NAME_STOPWORDS, min_len=2)))
             fw = first_word_match(crm_name, nm.text)
             contains_crm = contains_check(nm.text, crm_name)
             crm_contains = contains_check(crm_name, nm.text)
@@ -970,6 +1069,9 @@ def make_features_from_preprocessed(
     # D9: is_siege - head office indicator
     features["is_siege"] = float(cand.get("is_siege", False))
     
+    # B2: is_copropriete - syndicate of co-owners indicator (cj_ul == '9110')
+    features["is_copropriete"] = float(str(cand.get("cj_ul") or "").strip() == "9110")
+    
     # B1: is_association - check if candidate name contains association tokens
     cand_name_tokens = set(normalize_text(primary_cand_name).split()) if primary_cand_name else set()
     features["is_association"] = float(bool(cand_name_tokens & ASSOCIATION_TOKENS))
@@ -1045,9 +1147,14 @@ def make_features_from_preprocessed(
         best_cand_name_text = max(candidate_names, key=lambda nm: jaro_sim(crm_name, nm.text)).text
     features["name_norm_exact"] = float(crm_name == best_cand_name_text and crm_name != "")
     
-    # street_number_match: Street number exact match
+    # street_number_match: Street number exact match (supports multi-number intervals)
     if crm_street_num and cand_street_num:
-        features["street_number_match"] = float(str(crm_street_num).strip() == str(cand_street_num).strip())
+        crm_nums = parse_street_numbers(crm_street_num)
+        cand_nums = parse_street_numbers(cand_street_num)
+        if crm_nums and cand_nums and (crm_nums & cand_nums):
+            features["street_number_match"] = 1.0
+        else:
+            features["street_number_match"] = 0.0
     else:
         features["street_number_match"] = 0.0
 

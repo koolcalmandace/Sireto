@@ -227,60 +227,25 @@ def match_local_acronyms(
 
 
 # ---------------------------------------------------------------------------
-# Pilier 3: NAF Activity Bridge (INSEE Nomenclature Mapping)
+# ---------------------------------------------------------------------------
+# Pilier 3: NAF Activity Bridge (Continuous Semantic Vector Space Projection)
 # ---------------------------------------------------------------------------
 
-# Taxonomy mapping key sector keywords to official INSEE NAF divisions & classes
-NAF_SECTOR_TAXONOMY: Dict[str, Tuple[List[str], Tuple[str, ...]]] = {
-    "HEALTH_DENTAL": (
-        ["dentiste", "orthodontiste", "chirurgien dentiste", "cabinet dentaire",
-         "imagerie medicale", "radiologie", "scim", "centre d imagerie", "pedopsychiatrie",
-         "kinesitherapeute", "cabinet medical", "ophtalmologie"],
-        ("86.21", "86.22", "86.23", "86.90")
-    ),
-    "PHARMACY": (
-        ["pharmacie", "officine", "pharmacien"],
-        ("47.73",)
-    ),
-    "AUTOMOTIVE_TYRES": (
-        ["garage", "carrosserie", "pneumatique", "pneu", "controle technique",
-         "mecanique auto", "centre auto", "reparateur agree"],
-        ("45.20", "45.11")
-    ),
-    "BAKERY_FOOD": (
-        ["boulangerie", "patisserie", "boulanger", "patissier", "chocolaterie"],
-        ("10.71", "47.24")
-    ),
-    "CLOTHING_LINGERIE": (
-        ["lingerie", "pret a porter", "boutique de mode", "maroquinerie"],
-        ("47.71", "47.72")
-    ),
-    "GARDEN_PETS": (
-        ["jardinerie", "pepiniere", "horticulture", "animalerie", "fleuriste", "graineterie"],
-        ("47.76", "01.19")
-    ),
-    "CAMPING_HOTEL": (
-        ["camping", "parc residentiel", "village vacances", "hotellerie de plein air"],
-        ("55.30", "55.20")
-    ),
-    "SOCIAL_HOUSING": (
-        ["bailleur social", "office public habitat", "oph", "hlm", "logement social"],
-        ("68.20A",)
-    ),
-}
+from .naf_vector_engine import predict_naf
 
 
 def match_naf_activity(
     crm_name: str,
     candidates: List[Dict[str, Any]],
     crm_address: str = "",
+    min_vector_similarity: float = 0.12,
 ) -> Set[str]:
     """
-    Match CRM queries bearing an explicit sector keyword against the candidates'
-    NAF codes in the local commune.
+    Match CRM queries against the candidates' NAF codes in the local commune
+    using the continuous Semantic Vector Engine (INSEE NAF Rév. 2 projection).
     
     Safety guard: Rescues candidate only if:
-      - The candidate's NAF matches the detected sector, AND
+      - The candidate's NAF matches one of the top predicted NAF vector codes, AND
       - Either there are at most 2 candidates in that sector in the commune, OR
       - The candidate matches the street address in crm_address.
     """
@@ -290,28 +255,24 @@ def match_naf_activity(
     norm_name = normalize_token(crm_name)
     norm_addr = normalize_token(crm_address)
 
-    # 1. Detect target sector
-    detected_naf_prefixes: Optional[Tuple[str, ...]] = None
-    for _, (keywords, prefixes) in NAF_SECTOR_TAXONOMY.items():
-        if any(re.search(r"\b" + re.escape(kw) + r"\b", norm_name) for kw in keywords):
-            detected_naf_prefixes = prefixes
-            break
-
-    if not detected_naf_prefixes:
+    # 1. Project query into continuous INSEE NAF vector space
+    predicted_nafs = predict_naf(norm_name, top_k=3, min_similarity=min_vector_similarity)
+    if not predicted_nafs:
         return set()
 
-    # 2. Filter candidates in local partition matching this NAF
+    target_prefixes = [code.replace(".", "").upper()[:4] for code, _ in predicted_nafs]
+
+    # 2. Filter candidates in local partition matching the predicted NAF vectors
     matching_cands: List[Dict[str, Any]] = []
     for cand in candidates:
         cand_naf = str(cand.get("activitePrincipaleEtablissement") or cand.get("activitePrincipaleUniteLegale") or "")
         cand_naf = cand_naf.replace(".", "").upper()
+        if not cand_naf:
+            continue
         
-        # Check against target prefixes
-        for pref in detected_naf_prefixes:
-            clean_pref = pref.replace(".", "").upper()
-            if cand_naf.startswith(clean_pref):
-                matching_cands.append(cand)
-                break
+        # Check against target predicted NAF prefixes
+        if any(cand_naf.startswith(pref) for pref in target_prefixes):
+            matching_cands.append(cand)
 
     if not matching_cands:
         return set()
@@ -325,7 +286,7 @@ def match_naf_activity(
             if s:
                 rescued.add(s)
     elif norm_addr:
-        # Filter by address
+        # Filter strictly by street address
         for mc in matching_cands:
             cand_addr = normalize_token(f"{mc.get('numeroVoie', '')} {mc.get('libelleVoie', '')}")
             cand_words = [w for w in cand_addr.split() if w not in FRENCH_STOPWORDS and len(w) >= 3]

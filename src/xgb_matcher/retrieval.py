@@ -577,6 +577,16 @@ def build_candidate_pool(
                     if siret:
                         whitelisted_sirets.add(siret)
 
+        # 3d. Semantic Sidecar rescue (Brands & Acronyms)
+        if getattr(config, "rescue_sidecar", False):
+            try:
+                from .sidecar import run_entity_sidecar
+                sidecar_sirets = run_entity_sidecar(crm_name, crm_address, pool_list)
+                if sidecar_sirets:
+                    whitelisted_sirets.update(sidecar_sirets)
+            except Exception as e:
+                _logger.debug("Sidecar rescue skipped or error: %s", e)
+
     # Step 4: Prefilter — hybrid sparse (TF-IDF) + dense (FAISS) + rescue
     candidates = pool_list
     if config.prefilter_k and len(candidates) > config.prefilter_k:

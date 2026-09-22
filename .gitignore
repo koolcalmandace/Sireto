@@ -26,3 +26,5 @@ data/candidates_v8_national/
 data/source_sirene_*/
 data/*.parquet
 data/tfidf_cache/
+test_sandbox/
+scratch/
