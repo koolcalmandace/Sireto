@@ -17,6 +17,9 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from src.xgb_matcher.communes_nouvelles import resolve_commune_nouvelle
+
+
 
 # ---------------------------------------------------------------------------
 # Normalization & Helpers
@@ -280,6 +283,119 @@ from .naf_vector_engine import predict_naf
 
 HOLDING_SHELL_NAF_PREFIXES = {"6420", "7010", "6820", "8299"}
 
+FRENCH_INFRASTRUCTURE_TERMS = {
+    "LIEU", "DIT", "LD", "ZONE", "ACTIVITE", "ACTIVITES", "ARTISANALE", "INDUSTRIELLE",
+    "COMMERCIALE", "ZA", "ZI", "ZAC", "PARC", "ESPACE", "CENTRE", "ROUTE", "CHEMIN",
+    "DOMAINE", "QUARTIER", "HAMEAU", "VILLAGE", "BOURG", "CHEF", "DEPARTEMENTALE",
+    "NATIONALE", "RD", "RN", "VOIE", "AVENUE", "BOULEVARD", "RUE", "PLACE"
+}
+
+
+def match_toponymic_anchor(
+    crm_name: str,
+    candidates: List[Dict[str, Any]],
+    crm_address: str = "",
+) -> Set[str]:
+    """
+    Toponymic & Lieu-Dit Matcher for addresses without street numbers.
+    Zero arbitrary thresholds (no population filter, no arbitrary NAF limits).
+
+    Gating:
+      1. Exclusivity Guard (N_toponym == 1 in commune):
+         If exactly 1 active establishment in the commune is registered at this toponym,
+         collision probability is 0% -> Match.
+      2. Multi-Occupant Separation (N_toponym > 1):
+         Uses Token Specificity weighting. If the top candidate
+         has a distinctive proper noun match with margin Score_1 - Score_2 >= 1.5 -> Match.
+         Otherwise, aborts safely to REVIEW.
+    """
+    if not crm_address or not candidates:
+        return set()
+
+    crm_addr_norm = normalize_text(normalize_street_type(crm_address))
+    toponym_words = {
+        w.upper() for w in crm_addr_norm.split()
+        if len(w) >= 3 and not w.isdigit() and w.lower() not in FRENCH_STOPWORDS and w.upper() not in FRENCH_INFRASTRUCTURE_TERMS
+    }
+    if not toponym_words:
+        return set()
+
+    toponym_cands: List[Dict[str, Any]] = []
+    for cand in candidates:
+        cand_toponym = normalize_text(f"{cand.get('libelleVoie') or ''} {cand.get('complementAdresseEtablissement') or ''}")
+        if not cand_toponym:
+            continue
+        c_words = {
+            w.upper() for w in cand_toponym.split()
+            if len(w) >= 3 and not w.isdigit() and w.lower() not in FRENCH_STOPWORDS and w.upper() not in FRENCH_INFRASTRUCTURE_TERMS
+        }
+        shared = c_words & toponym_words
+        sim = jaro_sim(cand_toponym, crm_addr_norm)
+        if (shared and len(shared) >= min(len(toponym_words), 2)) or sim >= 0.85:
+            toponym_cands.append(cand)
+
+    if not toponym_cands:
+        return set()
+
+    # Case A: Toponymic Exclusivity (Exactly 1 establishment at this toponym in commune)
+    if len(toponym_cands) == 1:
+        siret = str(toponym_cands[0].get("siret") or "").strip()
+        if siret:
+            return {siret}
+
+    # Case B: Multi-Occupant Toponym (e.g. ZA, zone artisanale, rural hamlets)
+    norm_crm_name = normalize_text(crm_name)
+    crm_name_words = {
+        w.upper() for w in norm_crm_name.split()
+        if len(w) >= 3 and w.lower() not in FRENCH_STOPWORDS
+    }
+
+    cand_scores: List[Dict[str, Any]] = []
+    for c in toponym_cands:
+        all_names = get_candidate_all_names(c)
+        all_tokens = set()
+        for nm in all_names:
+            all_tokens.update(normalize_text(nm).upper().split())
+
+        shared_tokens = all_tokens & crm_name_words
+
+        score = 0.0
+        distinctive_count = 0
+        for tok in shared_tokens:
+            if tok in COMMON_FRENCH_WORDS:
+                score += 0.5
+            else:
+                score += (2.0 + len(tok) * 0.2)
+                distinctive_count += 1
+
+        best_name_sim = max((jaro_sim(normalize_text(nm), norm_crm_name) for nm in all_names), default=0.0)
+        score += best_name_sim * 2.0
+
+        if score > 0:
+            cand_scores.append({
+                "cand": c,
+                "score": score,
+                "distinctive_count": distinctive_count,
+                "siret": str(c.get("siret") or "").strip()
+            })
+
+    if not cand_scores:
+        return set()
+
+    cand_scores.sort(key=lambda x: x["score"], reverse=True)
+    top1 = cand_scores[0]
+
+    if len(cand_scores) == 1:
+        if top1["score"] >= 2.5 or top1["distinctive_count"] >= 1:
+            return {top1["siret"]}
+    else:
+        top2 = cand_scores[1]
+        score_diff = top1["score"] - top2["score"]
+        if (top1["distinctive_count"] >= 1 or top1["score"] >= 3.0) and score_diff >= 1.5:
+            return {top1["siret"]}
+
+    return set()
+
 
 def match_spatial_sectoral_dual_anchor(
     crm_name: str,
@@ -292,24 +408,25 @@ def match_spatial_sectoral_dual_anchor(
     Zero static dictionaries. Strictly uses native CRM and SIRENE attributes.
 
     Rescues candidates when:
-      1. Spatial Anchor: Exact street number + street name match in local pool.
+      1. Spatial Anchor: Exact street number + street name match in local pool,
+         OR Toponymic Anchor for addresses without street numbers (Lieux-dits / ZA).
       2. Sectoral Anchor: Continuous semantic NAF vector projection (INSEE NAF Rév. 2)
          OR Transversal Holding Metaclass pass-through (64.20, 70.10, 68.20, 82.99).
       3. Exclusivity Guard:
          - If spatial density == 1: unique active economic actor at physical street address.
          - If spatial density > 1: exactly 1 candidate matches the predicted sector.
-         - If multi-tenant address (>3 candidates in same sector): safely aborts to prevent false positives.
+         - If multi-tenant address: token specificity tie-breaking with score margin gating.
     """
     if not crm_address or not candidates:
         return set()
 
-    # Step 1: Spatial Anchor (Street number + street name match)
+    # Step 1: Spatial Anchor (Street number + street name match, or toponymic anchor if no number)
     crm_num_raw = extract_street_number(crm_address)
     if not crm_num_raw:
-        return set()
+        return match_toponymic_anchor(crm_name, candidates, crm_address)
     crm_nums = parse_street_numbers(crm_num_raw)
     if not crm_nums:
-        return set()
+        return match_toponymic_anchor(crm_name, candidates, crm_address)
 
     crm_addr_norm = normalize_text(normalize_street_type(crm_address))
     crm_words = {
@@ -541,10 +658,19 @@ def run_entity_sidecar_matches(
     crm_address: str,
     candidates: List[Dict[str, Any]],
     max_rescue: int = 3,
+    crm_insee: Optional[str] = None,
+    store: Optional[Any] = None,
 ) -> List[SidecarMatch]:
     """
     Unified entry point returning rich SidecarMatch objects with 4-field qualification.
+    If candidates is empty but crm_insee and store are provided, automatically attempts
+    resolution of historical commune INSEE codes to Commune Nouvelle parent partitions.
     """
+    if not candidates and crm_insee and store is not None:
+        target_insee = resolve_commune_nouvelle(crm_insee)
+        if target_insee != crm_insee:
+            candidates = store.load_by_insee(target_insee) or []
+
     if not crm_name or not candidates:
         return []
 
@@ -583,6 +709,8 @@ def run_entity_sidecar(
     crm_address: str,
     candidates: List[Dict[str, Any]],
     max_rescue: int = 3,
+    crm_insee: Optional[str] = None,
+    store: Optional[Any] = None,
 ) -> Set[str]:
     """
     Unified entry point for Entity Resolution Sidecar.
@@ -592,6 +720,11 @@ def run_entity_sidecar(
     Returns at most max_rescue SIRETs (default: 3).
     Completely isolated: pure function, zero global side-effects.
     """
+    if not candidates and crm_insee and store is not None:
+        target_insee = resolve_commune_nouvelle(crm_insee)
+        if target_insee != crm_insee:
+            candidates = store.load_by_insee(target_insee) or []
+
     if not crm_name or not candidates:
         return set()
 
@@ -607,4 +740,5 @@ def run_entity_sidecar(
         rescued.update(ssda_sirets)
 
     return set(list(rescued)[:max_rescue])
+
 

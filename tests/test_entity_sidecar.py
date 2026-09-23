@@ -377,3 +377,147 @@ def test_ssda_multi_tenant_token_specificity_tie_breaking():
     )
     assert rescued == {"89175624900019"}
 
+
+# ---------------------------------------------------------------------------
+# Communes Nouvelles & Toponymic (Lieu-Dit) Tests
+# ---------------------------------------------------------------------------
+
+def test_resolve_commune_nouvelle():
+    from src.xgb_matcher.communes_nouvelles import resolve_commune_nouvelle
+
+    # Known mergers / delegations
+    assert resolve_commune_nouvelle("74011") == "74010"  # Annecy-le-Vieux -> Annecy
+    assert resolve_commune_nouvelle("73928") == "73257"  # Val Thorens -> Les Belleville
+    assert resolve_commune_nouvelle("50173") == "50129"  # Equeurdreville -> Cherbourg-en-Cotentin
+    assert resolve_commune_nouvelle("59460") == "59183"  # Petite-Synthe -> Dunkerque
+
+    # Unmapped standard commune remains unchanged
+    assert resolve_commune_nouvelle("75056") == "75056"
+    assert resolve_commune_nouvelle("13055") == "13055"
+
+
+def test_toponymic_anchor_exclusive_match():
+    from src.xgb_matcher.sidecar import match_toponymic_anchor
+
+    candidates = [
+        {
+            "siret": "44411122200018",
+            "denomination": "DISTRIBUTION MATERIEL AGRICOLE",
+            "libelleVoie": "LIEU DIT MERCORENT",
+            "complementAdresseEtablissement": "BATIMENT A",
+            "activitePrincipaleEtablissement": "46.61Z",  # Commerce de matériel agricole
+        },
+        {
+            "siret": "55522233300019",
+            "denomination": "HOTEL DU CENTRE",
+            "libelleVoie": "RUE DE LA REPUBLIQUE",
+            "numeroVoie": "12",
+            "activitePrincipaleEtablissement": "55.10Z",
+        },
+    ]
+
+    # CRM query: address without street number, pointing to "ZA MERCORENT"
+    rescued = match_toponymic_anchor(
+        crm_name="DISTRIBUTION MATERIEL AGRICOLE",
+        candidates=candidates,
+        crm_address="ZA MERCORENT",
+    )
+    # Exactly 1 candidate exists at this toponym -> exclusive certified match
+    assert rescued == {"44411122200018"}
+
+
+def test_toponymic_anchor_multi_tenant_tie_breaking():
+    from src.xgb_matcher.sidecar import match_toponymic_anchor
+
+    candidates = [
+        {
+            "siret": "77700011100012",
+            "nom_ul": "MARTIN",
+            "prenom_usuel_ul": "PIERRE",
+            "enseigne1": "SCI DU MOULIN",
+            "libelleVoie": "LE MOULIN DE VENT",
+            "activitePrincipaleEtablissement": "68.20B",
+        },
+        {
+            "siret": "88800022200013",
+            "denomination": "BOULANGERIE DU MOULIN",
+            "libelleVoie": "LE MOULIN DE VENT",
+            "activitePrincipaleEtablissement": "10.71C",  # Boulangerie
+        },
+    ]
+
+    # Query for the bakery at the toponym: token specificity breaks tie
+    rescued = match_toponymic_anchor(
+        crm_name="BOULANGERIE ARTISANALE DU MOULIN",
+        candidates=candidates,
+        crm_address="LIEU DIT LE MOULIN DE VENT",
+    )
+    assert rescued == {"88800022200013"}
+
+
+def test_toponymic_anchor_ambiguity_rejection():
+    from src.xgb_matcher.sidecar import match_toponymic_anchor
+
+    # Two businesses in same sector at same toponym with identical scores
+    candidates = [
+        {
+            "siret": "11100011100011",
+            "denomination": "ENTREPRISE GENERALE DE BATIMENT A",
+            "libelleVoie": "ZONE ARTISANALE DES PRES",
+            "activitePrincipaleEtablissement": "41.20A",
+        },
+        {
+            "siret": "22200022200022",
+            "denomination": "ENTREPRISE GENERALE DE BATIMENT B",
+            "libelleVoie": "ZONE ARTISANALE DES PRES",
+            "activitePrincipaleEtablissement": "41.20A",
+        },
+    ]
+
+    # Generic query without distinguishing tokens -> must reject (empty set)
+    rescued = match_toponymic_anchor(
+        crm_name="ENTREPRISE GENERALE DE BATIMENT",
+        candidates=candidates,
+        crm_address="ZA DES PRES",
+    )
+    assert rescued == set()
+
+
+def test_sidecar_matches_with_commune_nouvelle_store():
+    class DummyStore:
+        def __init__(self):
+            self.loaded = []
+
+        def load_by_insee(self, insee_code):
+            self.loaded.append(insee_code)
+            if insee_code == "74010":  # Annecy parent partition
+                return [
+                    {
+                        "siret": "12345678900010",
+                        "denomination": "PHARMACIE DU LAC",
+                        "numeroVoie": "5",
+                        "typeVoie": "RUE",
+                        "libelleVoie": "DU LAC",
+                        "activitePrincipaleEtablissement": "47.73Z",
+                        "is_siege": True,
+                    }
+                ]
+            return []
+
+    dummy_store = DummyStore()
+
+    # Pass historical Annecy-le-Vieux code (74011) with empty initial candidates
+    matches = run_entity_sidecar_matches(
+        crm_name="PHARMACIE DU LAC",
+        crm_address="5 RUE DU LAC",
+        candidates=[],
+        crm_insee="74011",
+        store=dummy_store,
+    )
+
+    assert "74010" in dummy_store.loaded
+    assert len(matches) == 1
+    assert matches[0].siret_retenu == "12345678900010"
+    assert matches[0].pillar == "SSDA"
+
+
