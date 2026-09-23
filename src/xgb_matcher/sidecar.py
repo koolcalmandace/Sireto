@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 
@@ -35,6 +36,13 @@ COMMON_FRENCH_WORDS = {
     "EXPERTISE", "OPERATIONNEL", "INTERNAT", "EXTERNAT", "RAPIDO", "TEQUILA",
     "JARDIN", "JARDINS", "MAISON", "AGRICOLE", "NATURE", "ENSEMBLE", "FORMATION",
     "MAGASIN", "MAGASINS", "BOUTIQUE", "BOUTIQUES"
+}
+
+FRENCH_STREET_TYPES = {
+    "RUE", "AVENUE", "BOULEVARD", "CHEMIN", "ROUTE", "PLACE", "ALLEE", "IMPASSE",
+    "QUAI", "COURS", "SQUARE", "PASSAGE", "VOIE", "R", "AV", "BD", "CHE", "RTE",
+    "PL", "ALL", "IMP", "QU", "CRS", "SQ", "PAS", "PROMENADE", "PROM", "CENTRE",
+    "COMMERCIAL", "ZONE", "INDUSTRIELLE", "ACTIVITE", "LOTISSEMENT", "RESIDENCE"
 }
 
 
@@ -274,7 +282,10 @@ def match_spatial_sectoral_dual_anchor(
         return set()
 
     crm_addr_norm = normalize_text(normalize_street_type(crm_address))
-    crm_words = {w for w in crm_addr_norm.split() if len(w) >= 3 and not w.isdigit() and w not in FRENCH_STOPWORDS}
+    crm_words = {
+        w.upper() for w in crm_addr_norm.split()
+        if len(w) >= 3 and not w.isdigit() and w.lower() not in FRENCH_STOPWORDS and w.upper() not in FRENCH_STREET_TYPES
+    }
 
     spatial_cands: List[Dict[str, Any]] = []
     for cand in candidates:
@@ -289,12 +300,15 @@ def match_spatial_sectoral_dual_anchor(
         if not cand_voie:
             continue
 
-        voie_words = {w for w in cand_voie.split() if len(w) >= 3 and not w.isdigit() and w not in FRENCH_STOPWORDS}
+        voie_words = {
+            w.upper() for w in cand_voie.split()
+            if len(w) >= 3 and not w.isdigit() and w.lower() not in FRENCH_STOPWORDS and w.upper() not in FRENCH_STREET_TYPES
+        }
         shared_words = voie_words & crm_words
         sim = jaro_sim(cand_voie, crm_addr_norm)
 
-        # Exact number + shared street keyword or high jaro
-        if sim >= 0.70 or len(shared_words) >= 1:
+        # Exact number + shared specific street name word or high street jaro
+        if shared_words or sim >= 0.80:
             spatial_cands.append(cand)
 
     if not spatial_cands:
@@ -327,11 +341,13 @@ def match_spatial_sectoral_dual_anchor(
             elif any(c_naf_clean.startswith(h) for h in HOLDING_SHELL_NAF_PREFIXES):
                 holding_cands.append(cand)
 
-        # Also check name token overlap for holding/subsidiary disambiguation
-        cand_name = normalize_text(str(cand.get("denomination") or cand.get("denomination_ul") or cand.get("enseigne1") or ""))
-        cand_words = {w for w in cand_name.split() if len(w) >= 3 and w not in COMMON_FRENCH_WORDS and w not in FRENCH_STOPWORDS}
-        crm_name_words = {w for w in norm_crm_name.split() if len(w) >= 3 and w not in COMMON_FRENCH_WORDS and w not in FRENCH_STOPWORDS}
-        if cand_words & crm_name_words:
+        # Also check name token overlap / Jaro for holding/subsidiary disambiguation
+        cand_name = normalize_text(str(cand.get("denomination") or cand.get("denomination_ul") or cand.get("enseigne1") or cand.get("pm_dirigeant_names") or ""))
+        cand_words = {w for w in cand_name.split() if len(w) >= 3 and w.upper() not in COMMON_FRENCH_WORDS and w.lower() not in FRENCH_STOPWORDS}
+        crm_name_words = {w for w in norm_crm_name.split() if len(w) >= 3 and w.upper() not in COMMON_FRENCH_WORDS and w.lower() not in FRENCH_STOPWORDS}
+        
+        name_sim = jaro_sim(cand_name, norm_crm_name)
+        if (cand_words & crm_name_words) or name_sim >= 0.70:
             if cand not in sector_matching:
                 sector_matching.append(cand)
 
@@ -350,13 +366,127 @@ def match_spatial_sectoral_dual_anchor(
     return set()
 
 
+
 # Aliases for backward compatibility
 match_national_brand = match_spatial_sectoral_dual_anchor
 match_naf_activity = match_spatial_sectoral_dual_anchor
 
 
 # ---------------------------------------------------------------------------
-# Unified Sidecar Orchestrator Entry Point
+@dataclass
+class SidecarMatch:
+    """Unified qualification structure for an establishment match."""
+    siret_retenu: str
+    type_etablissement: str  # "SIEGE" | "SECONDAIRE" | "FILIALE"
+    siret_siege_holding: Optional[str] = None
+    nom_holding: Optional[str] = None
+    confidence: float = 1.0
+    pillar: str = "SSDA"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "siret_retenu": self.siret_retenu,
+            "type_etablissement": self.type_etablissement,
+            "siret_siege_holding": self.siret_siege_holding,
+            "nom_holding": self.nom_holding,
+            "confidence": self.confidence,
+            "pillar": self.pillar,
+        }
+
+
+def qualify_establishment(
+    cand: Dict[str, Any],
+    pool: Optional[List[Dict[str, Any]]] = None,
+    pillar: str = "SSDA",
+) -> SidecarMatch:
+    """
+    Qualify an establishment candidate into the unified 4-field schema:
+      - siret_retenu: The establishment SIRET at the physical site
+      - type_etablissement: 'SIEGE' | 'SECONDAIRE' | 'FILIALE'
+      - siret_siege_holding: SIRET of the headquarters / parent holding
+      - nom_holding: Corporate legal name of the enterprise / holding
+    """
+    siret = str(cand.get("siret") or "").strip()
+    is_siege = bool(cand.get("is_siege") or cand.get("etablissementSiege"))
+    siren = str(cand.get("siren") or (siret[:9] if len(siret) >= 9 else "")).strip()
+    nom_ul = str(cand.get("denomination_ul") or cand.get("denomination") or "").strip()
+    pm_dirigeant = str(cand.get("pm_dirigeant_names") or "").strip()
+
+    if is_siege:
+        return SidecarMatch(
+            siret_retenu=siret,
+            type_etablissement="SIEGE",
+            siret_siege_holding=siret,
+            nom_holding=nom_ul,
+            confidence=1.0,
+            pillar=pillar,
+        )
+
+    # Secondary establishment or subsidiary
+    siret_siege = None
+    if pool and siren:
+        for c in pool:
+            if str(c.get("siren")) == siren and bool(c.get("is_siege") or c.get("etablissementSiege")):
+                siret_siege = str(c.get("siret") or "").strip()
+                break
+
+    if pm_dirigeant:
+        type_etab = "FILIALE"
+        nom_h = pm_dirigeant
+    else:
+        type_etab = "SECONDAIRE"
+        nom_h = nom_ul
+
+    return SidecarMatch(
+        siret_retenu=siret,
+        type_etablissement=type_etab,
+        siret_siege_holding=siret_siege,
+        nom_holding=nom_h,
+        confidence=1.0,
+        pillar=pillar,
+    )
+
+
+def run_entity_sidecar_matches(
+    crm_name: str,
+    crm_address: str,
+    candidates: List[Dict[str, Any]],
+    max_rescue: int = 3,
+) -> List[SidecarMatch]:
+    """
+    Unified entry point returning rich SidecarMatch objects with 4-field qualification.
+    """
+    if not crm_name or not candidates:
+        return []
+
+    cand_by_siret = {str(c.get("siret")): c for c in candidates if c.get("siret")}
+    matches: List[SidecarMatch] = []
+    seen_sirets: Set[str] = set()
+
+    # 1. Dynamic Local Initialisms & Acronyms
+    acronym_sirets = match_local_acronyms(crm_name, candidates, crm_address)
+    for s in acronym_sirets:
+        if s in cand_by_siret and s not in seen_sirets:
+            matches.append(qualify_establishment(cand_by_siret[s], candidates, pillar="ACRONYM"))
+            seen_sirets.add(s)
+            if len(matches) >= max_rescue:
+                return matches
+
+    # 2. Universal SSDA
+    if len(matches) < max_rescue and crm_address:
+        ssda_sirets = match_spatial_sectoral_dual_anchor(crm_name, candidates, crm_address)
+        for s in ssda_sirets:
+            if s in cand_by_siret and s not in seen_sirets:
+                matches.append(qualify_establishment(cand_by_siret[s], candidates, pillar="SSDA"))
+                seen_sirets.add(s)
+                if len(matches) >= max_rescue:
+                    break
+
+    return matches
+
+
+# ---------------------------------------------------------------------------
+# Unified Sidecar Orchestrator Entry Point (Set of SIRETs for backward compatibility)
 # ---------------------------------------------------------------------------
 
 def run_entity_sidecar(
@@ -388,3 +518,4 @@ def run_entity_sidecar(
         rescued.update(ssda_sirets)
 
     return set(list(rescued)[:max_rescue])
+

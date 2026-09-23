@@ -16,7 +16,11 @@ from src.xgb_matcher.sidecar import (
     match_local_acronyms,
     match_naf_activity,
     match_national_brand,
+    match_spatial_sectoral_dual_anchor,
+    qualify_establishment,
     run_entity_sidecar,
+    run_entity_sidecar_matches,
+    SidecarMatch,
 )
 
 
@@ -227,3 +231,86 @@ def test_ssda_multi_tenant_ambiguity_abort():
     # Query for clothes shop at shopping mall: Ambiguity guard MUST abort to protect precision
     rescued = match_spatial_sectoral_dual_anchor("MAGASIN PRET A PORTER", candidates, crm_address="1 Centre Commercial")
     assert rescued == set()
+
+
+# ---------------------------------------------------------------------------
+# Unified 4-Field Qualification Tests (Establishment vs Holding)
+# ---------------------------------------------------------------------------
+
+def test_qualify_establishment_siege():
+    cand = {
+        "siret": "75290494600015",
+        "siren": "752904946",
+        "denomination_ul": "SO NICE HOTELS",
+        "is_siege": True,
+    }
+    match = qualify_establishment(cand)
+    assert match.siret_retenu == "75290494600015"
+    assert match.type_etablissement == "SIEGE"
+    assert match.siret_siege_holding == "75290494600015"
+    assert match.nom_holding == "SO NICE HOTELS"
+
+
+def test_qualify_establishment_secondaire():
+    pool = [
+        {"siret": "38491117800042", "siren": "384911178", "is_siege": True, "denomination_ul": "HOTEL CASSINI"},
+        {"siret": "38491117800034", "siren": "384911178", "is_siege": False, "denomination_ul": "HOTEL CASSINI"},
+    ]
+    cand = pool[1]
+    match = qualify_establishment(cand, pool=pool)
+    assert match.siret_retenu == "38491117800034"
+    assert match.type_etablissement == "SECONDAIRE"
+    assert match.siret_siege_holding == "38491117800042"
+    assert match.nom_holding == "HOTEL CASSINI"
+
+
+def test_qualify_establishment_filiale():
+    cand = {
+        "siret": "38491117800034",
+        "siren": "384911178",
+        "denomination_ul": "SOCIETE D EXPLOITATION HOTEL CASSINI",
+        "pm_dirigeant_names": "SO NICE HOTELS HOLDING",
+        "is_siege": False,
+    }
+    match = qualify_establishment(cand)
+    assert match.siret_retenu == "38491117800034"
+    assert match.type_etablissement == "FILIALE"
+    assert match.nom_holding == "SO NICE HOTELS HOLDING"
+
+
+def test_run_entity_sidecar_matches_ssda():
+    pool = [
+        {
+            "siret": "38491117800034",
+            "siren": "384911178",
+            "denomination": "HOTEL DU PIN",
+            "denomination_ul": "SOCIETE D EXPLOITATION HOTEL CASSINI",
+            "pm_dirigeant_names": "SO NICE HOTELS HOLDING",
+            "numeroVoie": "6",
+            "typeVoie": "RUE",
+            "libelleVoie": "EMMANUEL PHILIBERT",
+            "activitePrincipaleEtablissement": "55.10Z",
+            "is_siege": False,
+        },
+        {
+            "siret": "38491117800042",
+            "siren": "384911178",
+            "denomination_ul": "SOCIETE D EXPLOITATION HOTEL CASSINI",
+            "numeroVoie": "152",
+            "typeVoie": "BOULEVARD",
+            "libelleVoie": "DES JARDINIERS",
+            "is_siege": True,
+        }
+    ]
+
+    matches = run_entity_sidecar_matches(
+        crm_name="HOTEL DU PIN (KYRIAD)",
+        crm_address="6 RUE EMMANUEL PHILIBERT",
+        candidates=pool,
+    )
+    assert len(matches) == 1
+    m = matches[0]
+    assert m.siret_retenu == "38491117800034"
+    assert m.type_etablissement == "FILIALE"
+    assert m.nom_holding == "SO NICE HOTELS HOLDING"
+    assert m.siret_siege_holding == "38491117800042"

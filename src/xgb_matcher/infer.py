@@ -519,6 +519,27 @@ class XgbInferenceEngine:
                         traceback.print_exc()
                         print(f"Risk model crash: {e}")
             
+            is_siege_k = bool(cand_k.get("is_siege") or cand_k.get("etablissementSiege"))
+            siren_k = str(cand_k.get("siren") or (str(siret_k)[:9] if len(str(siret_k)) >= 9 else "")).strip()
+            nom_ul_k = str(cand_k.get("denomination_ul") or cand_k.get("denomination") or "").strip()
+            pm_dir_k = str(cand_k.get("pm_dirigeant_names") or "").strip()
+            if is_siege_k:
+                type_etab_k = "SIEGE"
+                siret_siege_k = str(siret_k)
+                nom_holding_k = nom_ul_k
+            elif pm_dir_k:
+                type_etab_k = "FILIALE"
+                siret_siege_k = None
+                nom_holding_k = pm_dir_k
+            else:
+                type_etab_k = "SECONDAIRE"
+                siret_siege_k = None
+                for _, sc in cand_list_n:
+                    if str(sc.get("siren")) == siren_k and bool(sc.get("is_siege") or sc.get("etablissementSiege")):
+                        siret_siege_k = str(sc.get("siret") or "").strip()
+                        break
+                nom_holding_k = nom_ul_k
+
             row = TopKRow(
                 crm_id=crm_input.crm_id,
                 crm_name=crm_input.crm_name,
@@ -526,6 +547,10 @@ class XgbInferenceEngine:
                 crm_postcode=crm_input.postcode,
                 crm_city=crm_input.crm_city,
                 siret_candidate=str(siret_k),
+                siret_retenu=str(siret_k),
+                type_etablissement=type_etab_k,
+                siret_siege_holding=siret_siege_k,
+                nom_holding=nom_holding_k,
                 score=float(scores[idx_k]),
                 score_top1=top1_score,
                 score_top2=top2_score,
@@ -1101,6 +1126,11 @@ class TopKRow:
     candidate_last_treatment_date: str | None = None
     routing_confidence: float | None = None
     routing_status: str | None = None
+    # Unified 4-field qualification (Establishment vs Holding)
+    siret_retenu: str = ""
+    type_etablissement: str = "SIEGE"
+    siret_siege_holding: str | None = None
+    nom_holding: str | None = None
     # Routing features (optional)
     name_jaro_max: float = 0.0
     name_token_overlap_max: float = 0.0
@@ -1132,6 +1162,10 @@ class TopKRow:
             "crm_postcode": self.crm_postcode,
             "crm_city": self.crm_city,
             "siret_candidate": self.siret_candidate,
+            "siret_retenu": self.siret_retenu or self.siret_candidate,
+            "type_etablissement": self.type_etablissement,
+            "siret_siege_holding": self.siret_siege_holding,
+            "nom_holding": self.nom_holding,
             "score": self.score,
             "score_top1": self.score_top1,
             "score_top2": self.score_top2,

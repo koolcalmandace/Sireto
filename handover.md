@@ -23,6 +23,7 @@
 | **Étape 5g**| **Dé-concaténation Alphanumérique Universelle & Acronymes Résilients aux Majuscules** | ✅ **Validée (100% Tests Passés)** | Dé-concaténation générique `([a-zA-Z]+)(\d+)` étendue à l'ensemble du TF-IDF (`blocking.py`) et du Sidecar (`sidecar.py`). Extraction d'acronymes résiliente aux exports CRM 100% majuscules *(commit `42922db`)* |
 | **Étape 5h**| **Intégrations Rescapées North Star & Injection Whitelist Sidecar** | ✅ **Validée (100% Tests Passés / 38 Tests)** | Correction bug historique acronymes C5, normalisation types de voie BAN, multi-représentation racines délimitées, intervalles et positions multiples de numéros de voie, feature copropriété (`cj_ul == 9110`), moteur vectoriel NAF Pilier 3, et injection de sauvetage Sidecar dans le retrieval ([`features.py`](src/xgb_matcher/features.py), [`retrieval.py`](src/xgb_matcher/retrieval.py), [`naf_vector_engine.py`](src/xgb_matcher/naf_vector_engine.py), [`rescued_integrations_spec.md`](docs/architecture/rescued_integrations_spec.md)) *(commit `4e4d9fc`)* |
 | **Étape 5i**| **Moteur Universel SSDA (Double-Ancre Spatiale-Sectorielle)** | ✅ **Validée (100% Tests Passés / 42 Tests)** | Éradication complète des dictionnaires statiques d'enseignes (`NATIONAL_FRANCHISE_NETWORKS`), mise en place du moteur généraliste Double-Ancre Spatiale (adresse BAN stricte) et Sectorielle (projection vectorielle continue NAF INSEE), réconciliation métaclasse holding (`64.20`, `70.10`, `68.20`, `82.99`), garde d'exclusivité mono-occupant (`density == 1`) et suite de tests durcie ([`sidecar.py`](src/xgb_matcher/sidecar.py), [`test_entity_sidecar.py`](tests/test_entity_sidecar.py)) *(commit `73b9da0`)* |
+| **Étape 5j**| **Réconciliation Établissement vs Holding & Schéma 4 Colonnes** | ✅ **Validée (141/459 cas / +30.7%)** | Branche `feature/holding-establishment-reconciliation` : qualification native 4 colonnes (`siret_retenu`, `type_etablissement`, `siret_siege_holding`, `nom_holding`), normalisation `FRENCH_STREET_TYPES`, enrichissement `SidecarMatch` et `TopKRow`, benchmark 459 cas prunés avec +141 cas qualifiés (hausse rappel actif 32k de 98.10% à 98.63%), 46/46 tests unitaires au vert ([`sidecar.py`](src/xgb_matcher/sidecar.py), [`infer.py`](src/xgb_matcher/infer.py), [`analysis_holding_reconciliation_benchmark_459.md`](docs/analysis/analysis_holding_reconciliation_benchmark_459.md)) |
 | **Étape 6** | **Réentraînement XGBoost v2 (Ranker, Decider, Risk)** | ⏳ **Feuille de route cadrée** | Voir décisions clés ci-dessous |
 
 
@@ -55,6 +56,13 @@
      - *Garde d'Exclusivité* : Whitelisting si et seulement si $N_{\text{secteur, adresse}} == 1$ (évite toute collision en centre commercial).
      - *Réconciliation NAF Holding / Exploitation* : Prise en charge des divergences via Dual-NAF (Établissement vs UL), métaclasse transversale holding (`64.20`, `70.10`, `68.20`), empreinte globale SIREN et liens de gouvernance (`pm_dirigeant_names`).
      - *Traitement des [ND] (RGPD)* : Résolution native des professionnels libéraux/médicaux masqués via l'exclusivité spatiale + NAF sans nécessiter de chaîne textuelle.
+7. **Schéma d'Output Unifié Établissement vs Holding (Clarté Opérationnelle & Audit)** :
+   - Élimination de toute confusion pour l'utilisateur final et lors des recherches indépendantes.
+   - Les 4 colonnes canoniques de qualification du livrable XGBoost :
+     - `siret_retenu` : SIRET attribué au bâtiment physique (sur site).
+     - `type_etablissement` : Qualification de l'entité (`SIEGE`, `SECONDAIRE`, `FILIALE`).
+     - `siret_siege_holding` : SIRET du siège social ou de la holding parente.
+     - `nom_holding` : Raison sociale légale de la société mère / holding.
 
 ---
 
