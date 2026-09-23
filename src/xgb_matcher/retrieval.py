@@ -581,11 +581,18 @@ def build_candidate_pool(
         if getattr(config, "rescue_sidecar", False):
             try:
                 from .sidecar import run_entity_sidecar
-                sidecar_sirets = run_entity_sidecar(crm_name, crm_address, pool_list)
+                sidecar_sirets = run_entity_sidecar(
+                    crm_name,
+                    crm_address,
+                    pool_list,
+                    crm_insee=insee,
+                    store=store,
+                )
                 if sidecar_sirets:
                     whitelisted_sirets.update(sidecar_sirets)
             except Exception as e:
                 _logger.debug("Sidecar rescue skipped or error: %s", e)
+
 
     # Step 4: Prefilter — hybrid sparse (TF-IDF) + dense (FAISS) + rescue
     candidates = pool_list
