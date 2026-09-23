@@ -60,7 +60,7 @@ INSEE_NAF_DESCRIPTIONS: Dict[str, str] = {
     # Section G : Commerce, Réparation automobile et motocycles
     # -----------------------------------------------------------------------
     "45.11Z": "Commerce de voitures et de vehicules automobiles legers concessionnaire vente autos",
-    "45.20A": "Entretien et reparation de vehicules automobiles legers garage mecanique carrosserie pneumatiques controle technique",
+    "45.20A": "Entretien et reparation de vehicules automobiles legers garage mecanique carrosserie pneu pneus pneumatiques controle technique",
     "45.20B": "Entretien et reparation d autres vehicules automobiles poids lourds camions",
     "45.32Z": "Commerce de detail d equipements automobiles pieces detachees et accessoires auto",
     "45.40Z": "Commerce et reparation de motocycles motos scooters quads cyclomoteurs",

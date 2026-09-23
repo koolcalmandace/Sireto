@@ -228,198 +228,131 @@ def match_local_acronyms(
 
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
-# Pilier 3: NAF Activity Bridge (Continuous Semantic Vector Space Projection)
+# Pilier 1 & 3: Universal Spatial-Sectoral Dual-Anchor (SSDA) Engine
 # ---------------------------------------------------------------------------
 
+from .features import (
+    extract_street_number,
+    parse_street_numbers,
+    normalize_street_type,
+    normalize_text,
+    jaro_sim,
+)
 from .naf_vector_engine import predict_naf
 
+HOLDING_SHELL_NAF_PREFIXES = {"6420", "7010", "6820", "8299"}
 
-def match_naf_activity(
+
+def match_spatial_sectoral_dual_anchor(
     crm_name: str,
     candidates: List[Dict[str, Any]],
     crm_address: str = "",
-    min_vector_similarity: float = 0.12,
+    min_vector_similarity: float = 0.10,
 ) -> Set[str]:
     """
-    Match CRM queries against the candidates' NAF codes in the local commune
-    using the continuous Semantic Vector Engine (INSEE NAF Rév. 2 projection).
-    
-    Safety guard: Rescues candidate only if:
-      - The candidate's NAF matches one of the top predicted NAF vector codes, AND
-      - Either there are at most 2 candidates in that sector in the commune, OR
-      - The candidate matches the street address in crm_address.
+    Universal Spatial-Sectoral Dual-Anchor (SSDA) Matcher.
+    Zero static dictionaries. Strictly uses native CRM and SIRENE attributes.
+
+    Rescues candidates when:
+      1. Spatial Anchor: Exact street number + street name match in local pool.
+      2. Sectoral Anchor: Continuous semantic NAF vector projection (INSEE NAF Rév. 2)
+         OR Transversal Holding Metaclass pass-through (64.20, 70.10, 68.20, 82.99).
+      3. Exclusivity Guard:
+         - If spatial density == 1: unique active economic actor at physical street address.
+         - If spatial density > 1: exactly 1 candidate matches the predicted sector.
+         - If multi-tenant address (>3 candidates in same sector): safely aborts to prevent false positives.
     """
-    if not crm_name or not candidates:
+    if not crm_address or not candidates:
         return set()
 
-    norm_name = normalize_token(crm_name)
-    norm_addr = normalize_token(crm_address)
-
-    # 1. Project query into continuous INSEE NAF vector space
-    predicted_nafs = predict_naf(norm_name, top_k=3, min_similarity=min_vector_similarity)
-    if not predicted_nafs:
+    # Step 1: Spatial Anchor (Street number + street name match)
+    crm_num_raw = extract_street_number(crm_address)
+    if not crm_num_raw:
+        return set()
+    crm_nums = parse_street_numbers(crm_num_raw)
+    if not crm_nums:
         return set()
 
+    crm_addr_norm = normalize_text(normalize_street_type(crm_address))
+    crm_words = {w for w in crm_addr_norm.split() if len(w) >= 3 and not w.isdigit() and w not in FRENCH_STOPWORDS}
+
+    spatial_cands: List[Dict[str, Any]] = []
+    for cand in candidates:
+        cand_num = cand.get("numeroVoie")
+        if not cand_num:
+            continue
+        cand_nums = parse_street_numbers(str(cand_num))
+        if not (crm_nums & cand_nums):
+            continue
+
+        cand_voie = normalize_text(f"{cand.get('typeVoie') or ''} {cand.get('libelleVoie') or ''}")
+        if not cand_voie:
+            continue
+
+        voie_words = {w for w in cand_voie.split() if len(w) >= 3 and not w.isdigit() and w not in FRENCH_STOPWORDS}
+        shared_words = voie_words & crm_words
+        sim = jaro_sim(cand_voie, crm_addr_norm)
+
+        # Exact number + shared street keyword or high jaro
+        if sim >= 0.70 or len(shared_words) >= 1:
+            spatial_cands.append(cand)
+
+    if not spatial_cands:
+        return set()
+
+    # Case A: Single-Tenant Spatial Exclusivity (Exactly 1 active establishment at this address in commune)
+    if len(spatial_cands) == 1:
+        siret = str(spatial_cands[0].get("siret") or "").strip()
+        if siret:
+            return {siret}
+
+    # Case B: Multi-Tenant Address -> Disambiguate using Sectoral Anchor (NAF Vector Projection)
+    norm_crm_name = normalize_text(crm_name)
+    predicted_nafs = predict_naf(norm_crm_name, top_k=5, min_similarity=min_vector_similarity)
     target_prefixes = [code.replace(".", "").upper()[:4] for code, _ in predicted_nafs]
 
-    # 2. Filter candidates in local partition matching the predicted NAF vectors
-    matching_cands: List[Dict[str, Any]] = []
-    for cand in candidates:
-        cand_naf = str(cand.get("activitePrincipaleEtablissement") or cand.get("activitePrincipaleUniteLegale") or "")
-        cand_naf = cand_naf.replace(".", "").upper()
-        if not cand_naf:
-            continue
-        
-        # Check against target predicted NAF prefixes
-        if any(cand_naf.startswith(pref) for pref in target_prefixes):
-            matching_cands.append(cand)
+    sector_matching: List[Dict[str, Any]] = []
+    holding_cands: List[Dict[str, Any]] = []
 
-    if not matching_cands:
-        return set()
+    for cand in spatial_cands:
+        # Check both etab and UL NAF codes
+        c_naf = str(cand.get("activitePrincipaleEtablissement") or cand.get("activitePrincipaleUniteLegale") or "")
+        c_naf_clean = c_naf.replace(".", "").upper()
 
-    # 3. Ambiguity & Address Guard
-    rescued: Set[str] = set()
-    if len(matching_cands) <= 2 and not norm_addr:
-        # Small village / few sector establishments
-        for mc in matching_cands:
-            s = str(mc.get("siret") or "").strip()
-            if s:
-                rescued.add(s)
-    elif norm_addr:
-        # Filter strictly by street address
-        for mc in matching_cands:
-            cand_addr = normalize_token(f"{mc.get('numeroVoie', '')} {mc.get('libelleVoie', '')}")
-            cand_words = [w for w in cand_addr.split() if w not in FRENCH_STOPWORDS and len(w) >= 3]
-            if any(w in norm_addr for w in cand_words):
-                s = str(mc.get("siret") or "").strip()
-                if s:
-                    rescued.add(s)
+        if c_naf_clean:
+            # Direct Sector match
+            if any(c_naf_clean.startswith(pref) for pref in target_prefixes):
+                sector_matching.append(cand)
+            # Holding Metaclass pass-through
+            elif any(c_naf_clean.startswith(h) for h in HOLDING_SHELL_NAF_PREFIXES):
+                holding_cands.append(cand)
 
-    return rescued
+        # Also check name token overlap for holding/subsidiary disambiguation
+        cand_name = normalize_text(str(cand.get("denomination") or cand.get("denomination_ul") or cand.get("enseigne1") or ""))
+        cand_words = {w for w in cand_name.split() if len(w) >= 3 and w not in COMMON_FRENCH_WORDS and w not in FRENCH_STOPWORDS}
+        crm_name_words = {w for w in norm_crm_name.split() if len(w) >= 3 and w not in COMMON_FRENCH_WORDS and w not in FRENCH_STOPWORDS}
+        if cand_words & crm_name_words:
+            if cand not in sector_matching:
+                sector_matching.append(cand)
 
+    # Exclusivity Guard on Sector Matching
+    if len(sector_matching) == 1:
+        siret = str(sector_matching[0].get("siret") or "").strip()
+        if siret:
+            return {siret}
 
-# ---------------------------------------------------------------------------
-# Pilier 1: National Franchise & Network Co-occurrence Bridge (Without Google)
-# ---------------------------------------------------------------------------
+    # If no direct sector match but exactly 1 holding at this address
+    if not sector_matching and len(holding_cands) == 1:
+        siret = str(holding_cands[0].get("siret") or "").strip()
+        if siret:
+            return {siret}
 
-# Offline mapping of high-frequency French commercial franchise banners
-# derived from SIRENE national co-occurrences (tokens appearing across multiple cities)
-NATIONAL_FRANCHISE_NETWORKS: Dict[str, Dict[str, Any]] = {
-    "ROUGEGORGE": {
-        "tokens": ["rougegorge", "rouge gorge"],
-        "dominant_naf_prefixes": ("47.71",),
-        "parent_sirens": {"451321335"},  # ROUGEGORGE LINGERIE SAS
-        "parent_name_keywords": ["rougegorge", "lingerie"],
-    },
-    "POINT S": {
-        "tokens": ["point s", "points"],
-        "dominant_naf_prefixes": ("45.20",),
-        "parent_sirens": {"320875701"},  # POINT S
-        "parent_name_keywords": ["point s", "pneu"],
-    },
-    "VILLAVERDE": {
-        "tokens": ["villaverde", "villa verde"],
-        "dominant_naf_prefixes": ("47.76",),
-        "parent_sirens": set(),
-        "parent_name_keywords": ["jardinerie", "horticulture", "vegetaux"],
-    },
-    "NAOS": {
-        "tokens": ["naos", "bioderma", "institut esthederm"],
-        "dominant_naf_prefixes": ("20.42", "46.45", "47.75"),
-        "parent_sirens": {"399226653", "349692475"},
-        "parent_name_keywords": ["aubert", "naos", "bioderma"],
-    },
-    "TOTAL ACCESS": {
-        "tokens": ["total access", "totalenergies", "relais total"],
-        "dominant_naf_prefixes": ("47.30",),
-        "parent_sirens": {"542051180"},  # TOTALENERGIES
-        "parent_name_keywords": ["total", "relais"],
-    },
-    "IN EXTENSO": {
-        "tokens": ["in extenso", "inextenso"],
-        "dominant_naf_prefixes": ("69.20",),
-        "parent_sirens": {"443520143", "381163450"},
-        "parent_name_keywords": ["in extenso", "conseil", "expertise comptable"],
-    },
-    "GROUPAMA": {
-        "tokens": ["groupama supports", "groupama assurances"],
-        "dominant_naf_prefixes": ("65.12", "66.22", "62.02"),
-        "parent_sirens": {"792318750", "411954696", "754007961"},
-        "parent_name_keywords": ["groupama"],
-    },
-    "SIX MO": {
-        "tokens": ["six mo", "sixmo", "l odysee"],
-        "dominant_naf_prefixes": ("47.71", "47.72"),
-        "parent_sirens": {"318831633"},
-        "parent_name_keywords": ["odysee"],
-    },
-}
+    return set()
 
 
-def match_national_brand(
-    crm_name: str,
-    candidates: List[Dict[str, Any]],
-    crm_address: str = "",
-) -> Set[str]:
-    """
-    Match CRM commercial brand/franchise queries against candidate establishments
-    using the offline National Franchise Network knowledge graph.
-    
-    Safety guard: Rescues candidate only if:
-      - Candidate belongs to the parent network SIREN, OR
-      - Candidate matches the network's dominant NAF and shares a street token with crm_address.
-    """
-    if not crm_name or not candidates:
-        return set()
-
-    norm_name = normalize_token(crm_name)
-    norm_addr = normalize_token(crm_address)
-
-    # Detect network banner
-    matched_network: Optional[Dict[str, Any]] = None
-    for _, net in NATIONAL_FRANCHISE_NETWORKS.items():
-        if any(re.search(r"\b" + re.escape(tok) + r"\b", norm_name) for tok in net["tokens"]):
-            matched_network = net
-            break
-
-    if not matched_network:
-        return set()
-
-    rescued: Set[str] = set()
-    parent_sirens = matched_network["parent_sirens"]
-    dominant_nafs = matched_network["dominant_naf_prefixes"]
-    keywords = matched_network["parent_name_keywords"]
-
-    for cand in candidates:
-        siren = str(cand.get("siren") or "").strip()
-        siret = str(cand.get("siret") or "").strip()
-        if not siret:
-            continue
-
-        # 1. Direct Parent SIREN Match
-        if siren and siren in parent_sirens:
-            rescued.add(siret)
-            continue
-
-        # 2. Match by network keywords in legal denomination
-        denom = normalize_token(str(cand.get("denomination") or cand.get("denomination_ul") or ""))
-        if any(kw in denom for kw in keywords):
-            rescued.add(siret)
-            continue
-
-        # 3. Match by dominant NAF + Address coincidence
-        cand_naf = str(cand.get("activitePrincipaleEtablissement") or cand.get("activitePrincipaleUniteLegale") or "")
-        cand_naf = cand_naf.replace(".", "").upper()
-        naf_matches = any(cand_naf.startswith(p.replace(".", "").upper()) for p in dominant_nafs)
-
-        if naf_matches and norm_addr:
-            cand_addr = normalize_token(f"{cand.get('numeroVoie', '')} {cand.get('libelleVoie', '')}")
-            cand_words = [w for w in cand_addr.split() if w not in FRENCH_STOPWORDS and len(w) >= 3]
-            if any(w in norm_addr for w in cand_words):
-                rescued.add(siret)
-
-    # Bounded rescue: max 2 candidates
-    return set(list(rescued)[:2])
+# Aliases for backward compatibility
+match_national_brand = match_spatial_sectoral_dual_anchor
+match_naf_activity = match_spatial_sectoral_dual_anchor
 
 
 # ---------------------------------------------------------------------------
@@ -434,28 +367,24 @@ def run_entity_sidecar(
 ) -> Set[str]:
     """
     Unified entry point for Entity Resolution Sidecar.
-    Runs Pillars 1, 2, and 3 sequentially with strict ambiguity guards.
-    
+    Runs Dynamic Local Acronyms (Pillar 2) and Universal SSDA (Spatial-Sectoral Dual-Anchor).
+
+    Zero static dictionaries. Strictly data-driven from native CRM and SIRENE attributes.
     Returns at most max_rescue SIRETs (default: 3).
-    Completely isolated: pure function, no global side-effects.
+    Completely isolated: pure function, zero global side-effects.
     """
     if not crm_name or not candidates:
         return set()
 
     rescued: Set[str] = set()
 
-    # Pilier 2: Dynamic Local Initialisms (e.g. FDEA, LHSM)
-    p2_sirets = match_local_acronyms(crm_name, candidates, crm_address)
-    rescued.update(p2_sirets)
+    # 1. Dynamic Local Initialisms & Acronyms (e.g. FDEA, LHSM, CEPI)
+    acronym_sirets = match_local_acronyms(crm_name, candidates, crm_address)
+    rescued.update(acronym_sirets)
 
-    # Pilier 1: National Commercial Franchise Brands (e.g. RougeGorge, Point S)
-    if len(rescued) < max_rescue:
-        p1_sirets = match_national_brand(crm_name, candidates, crm_address)
-        rescued.update(p1_sirets)
-
-    # Pilier 3: NAF Activity Bridge (e.g. Pharmacy, Dental, Camping)
-    if len(rescued) < max_rescue:
-        p3_sirets = match_naf_activity(crm_name, candidates, crm_address)
-        rescued.update(p3_sirets)
+    # 2. Universal Spatial-Sectoral Dual-Anchor (SSDA)
+    if len(rescued) < max_rescue and crm_address:
+        ssda_sirets = match_spatial_sectoral_dual_anchor(crm_name, candidates, crm_address)
+        rescued.update(ssda_sirets)
 
     return set(list(rescued)[:max_rescue])

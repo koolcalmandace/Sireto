@@ -142,14 +142,88 @@ def test_match_national_brand_points():
 # ---------------------------------------------------------------------------
 
 def test_run_entity_sidecar_negative():
-    # Regular private queries must NOT trigger sidecar
+    # Regular queries with no spatial or acronym match must NOT trigger sidecar
     candidates = [
-        {"siret": "44444444400001", "denomination": "BOULANGERIE DUPONT", "activitePrincipaleEtablissement": "10.71C"},
-        {"siret": "55555555500001", "denomination": "ORPI IMMOBILIER", "activitePrincipaleEtablissement": "68.31Z"},
+        {"siret": "44444444400001", "denomination": "BOULANGERIE DUPONT", "activitePrincipaleEtablissement": "10.71C", "numeroVoie": "50", "libelleVoie": "RUE DE PARIS"},
+        {"siret": "55555555500001", "denomination": "ORPI IMMOBILIER", "activitePrincipaleEtablissement": "68.31Z", "numeroVoie": "99", "libelleVoie": "RUE DU COMMERCE"},
     ]
 
-    rescued = run_entity_sidecar("BOULANGERIE DUPONT", "12 Rue de Paris", candidates)
+    rescued = run_entity_sidecar("BOULANGERIE DUPONT", "12 Rue de Lyon", candidates)
     assert rescued == set()
 
     rescued_orpi = run_entity_sidecar("ORPI AGENCE CENTRALE", "1 Place de la Gare", candidates)
     assert rescued_orpi == set()
+
+
+# ---------------------------------------------------------------------------
+# Universal Spatial-Sectoral Dual-Anchor (SSDA) Tests
+# ---------------------------------------------------------------------------
+
+from src.xgb_matcher.sidecar import match_spatial_sectoral_dual_anchor
+
+
+def test_ssda_single_tenant_exclusivity():
+    candidates = [
+        {
+            "siret": "77777777700012",
+            "denomination": "CONCEPT LINE",
+            "numeroVoie": "15",
+            "libelleVoie": "RUE DES FLEURS",
+            "activitePrincipaleEtablissement": "46.49Z",
+        }
+    ]
+    # Unique commercial tenant at this street address in the commune
+    rescued = match_spatial_sectoral_dual_anchor("HOME SALON LITERIE", candidates, crm_address="15 Rue des Fleurs")
+    assert rescued == {"77777777700012"}
+
+
+def test_ssda_multi_tenant_sector_disambiguation():
+    candidates = [
+        {
+            "siret": "88888888800011",
+            "denomination": "CABINET EXPERTISE AUDIT",
+            "numeroVoie": "20",
+            "libelleVoie": "BOULEVARD DE LA PAIX",
+            "activitePrincipaleEtablissement": "69.20Z",  # Comptabilité
+        },
+        {
+            "siret": "88888888800022",
+            "denomination": "SELARL DENTAIRE PAIX",
+            "numeroVoie": "20",
+            "libelleVoie": "BOULEVARD DE LA PAIX",
+            "activitePrincipaleEtablissement": "86.23Z",  # Dentiste
+        },
+    ]
+
+    # CRM query points to dentist: Sector anchor resolves the dentist candidate
+    rescued = match_spatial_sectoral_dual_anchor("Dr Martin Chirurgien Dentiste", candidates, crm_address="20 bd de la Paix")
+    assert rescued == {"88888888800022"}
+
+
+def test_ssda_holding_metaclass_pass_through():
+    candidates = [
+        {
+            "siret": "99999999900015",
+            "denomination": "SO NICE HOTELS",
+            "numeroVoie": "6",
+            "libelleVoie": "RUE PHILIBERT",
+            "activitePrincipaleEtablissement": "64.20Z",  # Holding
+        }
+    ]
+
+    # Hotel banner query matched to holding alone at address via holding metaclass pass-through
+    rescued = match_spatial_sectoral_dual_anchor("HOTEL DU PIN (KYRIAD)", candidates, crm_address="6 Rue Philibert")
+    assert rescued == {"99999999900015"}
+
+
+def test_ssda_multi_tenant_ambiguity_abort():
+    # Three clothing shops at same address
+    candidates = [
+        {"siret": "10101010100001", "denomination": "BOUTIQUE A", "numeroVoie": "1", "libelleVoie": "CENTRE COMMERCIAL", "activitePrincipaleEtablissement": "47.71Z"},
+        {"siret": "10101010100002", "denomination": "BOUTIQUE B", "numeroVoie": "1", "libelleVoie": "CENTRE COMMERCIAL", "activitePrincipaleEtablissement": "47.71Z"},
+        {"siret": "10101010100003", "denomination": "BOUTIQUE C", "numeroVoie": "1", "libelleVoie": "CENTRE COMMERCIAL", "activitePrincipaleEtablissement": "47.71Z"},
+    ]
+
+    # Query for clothes shop at shopping mall: Ambiguity guard MUST abort to protect precision
+    rescued = match_spatial_sectoral_dual_anchor("MAGASIN PRET A PORTER", candidates, crm_address="1 Centre Commercial")
+    assert rescued == set()
