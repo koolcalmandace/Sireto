@@ -60,6 +60,41 @@ def normalize_token(text: str | None) -> str:
     return " ".join(text.split())
 
 
+def get_candidate_all_names(cand: Dict[str, Any]) -> List[str]:
+    """
+    Extract all declared legal, commercial, and civil names for a candidate.
+    Handles both Personnes Morales (corporate entities) and Personnes Physiques (sole proprietors).
+    """
+    names: List[str] = []
+    if cand.get("denomination"):
+        names.append(str(cand["denomination"]))
+    if cand.get("denomination_ul"):
+        names.append(str(cand["denomination_ul"]))
+    if cand.get("denomination_usuelle_ul"):
+        names.append(str(cand["denomination_usuelle_ul"]))
+    if cand.get("denominationUsuelleEtablissement"):
+        names.append(str(cand["denominationUsuelleEtablissement"]))
+
+    # Personnes Physiques: civil names (nom_ul, prenom_usuel_ul)
+    nom = str(cand.get("nom_ul") or "").strip()
+    prenom = str(cand.get("prenom_usuel_ul") or "").strip()
+    if nom:
+        if prenom:
+            names.append(f"{prenom} {nom}".strip())
+            names.append(f"{nom} {prenom}".strip())
+        names.append(nom)
+
+    for ens in (cand.get("enseigne1"), cand.get("enseigne2"), cand.get("enseigne3")):
+        if ens:
+            names.append(str(ens))
+    if cand.get("pm_dirigeant_names"):
+        names.append(str(cand["pm_dirigeant_names"]))
+    if cand.get("sigle_ul"):
+        names.append(str(cand["sigle_ul"]))
+
+    return list(dict.fromkeys(n for n in names if n.strip()))
+
+
 def extract_acronym_candidates(crm_name: str) -> List[str]:
     """
     Extract candidate acronym tokens from CRM name.
@@ -184,13 +219,8 @@ def match_local_acronyms(
         matching_cands: List[Dict[str, Any]] = []
 
         for cand in candidates:
-            # Check primary candidate names
-            names_to_check = [
-                cand.get("denomination"),
-                cand.get("denomination_ul"),
-                cand.get("sigle_ul"),
-                cand.get("enseigne1"),
-            ]
+            # Check all candidate names (corporate, commercial, civil)
+            names_to_check = get_candidate_all_names(cand)
             
             # 1. Direct match with official sigle_ul if declared
             sigle = normalize_token(str(cand.get("sigle_ul") or "")).upper()
@@ -320,8 +350,13 @@ def match_spatial_sectoral_dual_anchor(
         if siret:
             return {siret}
 
-    # Case B: Multi-Tenant Address -> Disambiguate using Sectoral Anchor (NAF Vector Projection)
+    # Case B: Multi-Tenant Address -> Sectoral Matching + Token Specificity Disambiguation
     norm_crm_name = normalize_text(crm_name)
+    crm_name_words = {
+        w.upper() for w in norm_crm_name.split()
+        if len(w) >= 3 and w.lower() not in FRENCH_STOPWORDS
+    }
+
     predicted_nafs = predict_naf(norm_crm_name, top_k=5, min_similarity=min_vector_similarity)
     target_prefixes = [code.replace(".", "").upper()[:4] for code, _ in predicted_nafs]
 
@@ -341,23 +376,65 @@ def match_spatial_sectoral_dual_anchor(
             elif any(c_naf_clean.startswith(h) for h in HOLDING_SHELL_NAF_PREFIXES):
                 holding_cands.append(cand)
 
-        # Also check name token overlap / Jaro for holding/subsidiary disambiguation
-        cand_name = normalize_text(str(cand.get("denomination") or cand.get("denomination_ul") or cand.get("enseigne1") or cand.get("pm_dirigeant_names") or ""))
-        cand_words = {w for w in cand_name.split() if len(w) >= 3 and w.upper() not in COMMON_FRENCH_WORDS and w.lower() not in FRENCH_STOPWORDS}
-        crm_name_words = {w for w in norm_crm_name.split() if len(w) >= 3 and w.upper() not in COMMON_FRENCH_WORDS and w.lower() not in FRENCH_STOPWORDS}
-        
-        name_sim = jaro_sim(cand_name, norm_crm_name)
-        if (cand_words & crm_name_words) or name_sim >= 0.70:
+        # Check all names (corporate, civil, commercial) for token overlap / Jaro
+        cand_all_names = get_candidate_all_names(cand)
+        cand_words = set()
+        for nm in cand_all_names:
+            cand_words.update(w.upper() for w in normalize_text(nm).split() if len(w) >= 3 and w.lower() not in FRENCH_STOPWORDS)
+
+        best_sim = max((jaro_sim(normalize_text(nm), norm_crm_name) for nm in cand_all_names), default=0.0)
+        shared_distinctive = {w for w in (cand_words & crm_name_words) if w not in COMMON_FRENCH_WORDS}
+
+        if shared_distinctive or (cand_words & crm_name_words) or best_sim >= 0.70:
             if cand not in sector_matching:
                 sector_matching.append(cand)
 
-    # Exclusivity Guard on Sector Matching
+    # 1. Direct Exclusivity Guard on Sector Matching: Exactly 1 candidate on site
     if len(sector_matching) == 1:
         siret = str(sector_matching[0].get("siret") or "").strip()
         if siret:
             return {siret}
 
-    # If no direct sector match but exactly 1 holding at this address
+    # 2. Multi-Tenant Tie-Breaking: Multiple candidates matched sector/name at this address
+    if len(sector_matching) > 1:
+        cand_scores = []
+        for c in sector_matching:
+            all_names = get_candidate_all_names(c)
+            all_tokens = set()
+            for nm in all_names:
+                all_tokens.update(normalize_text(nm).upper().split())
+
+            shared_tokens = all_tokens & crm_name_words
+
+            score = 0.0
+            distinctive_count = 0
+            for tok in shared_tokens:
+                if tok in COMMON_FRENCH_WORDS:
+                    score += 0.5
+                else:
+                    score += (2.0 + len(tok) * 0.2)
+                    distinctive_count += 1
+
+            best_name_sim = max((jaro_sim(normalize_text(nm), norm_crm_name) for nm in all_names), default=0.0)
+            score += best_name_sim * 2.0
+
+            cand_scores.append({
+                "cand": c,
+                "score": score,
+                "distinctive_count": distinctive_count,
+                "siret": str(c.get("siret") or "").strip()
+            })
+
+        cand_scores.sort(key=lambda x: x["score"], reverse=True)
+        top1 = cand_scores[0]
+        top2 = cand_scores[1]
+        score_diff = top1["score"] - top2["score"]
+
+        # If top1 has distinctive proper noun or high score and decisive margin over runner-up
+        if (top1["distinctive_count"] >= 1 or top1["score"] >= 3.0) and score_diff >= 1.5:
+            return {top1["siret"]}
+
+    # 3. Holding Metaclass Fallback
     if not sector_matching and len(holding_cands) == 1:
         siret = str(holding_cands[0].get("siret") or "").strip()
         if siret:
@@ -410,6 +487,16 @@ def qualify_establishment(
     is_siege = bool(cand.get("is_siege") or cand.get("etablissementSiege"))
     siren = str(cand.get("siren") or (siret[:9] if len(siret) >= 9 else "")).strip()
     nom_ul = str(cand.get("denomination_ul") or cand.get("denomination") or "").strip()
+    if not nom_ul:
+        nom = str(cand.get("nom_ul") or "").strip()
+        prenom = str(cand.get("prenom_usuel_ul") or "").strip()
+        if nom and prenom:
+            nom_ul = f"{prenom} {nom}"
+        elif nom:
+            nom_ul = nom
+        elif cand.get("enseigne1"):
+            nom_ul = str(cand.get("enseigne1")).strip()
+
     pm_dirigeant = str(cand.get("pm_dirigeant_names") or "").strip()
 
     if is_siege:
@@ -428,6 +515,8 @@ def qualify_establishment(
         for c in pool:
             if str(c.get("siren")) == siren and bool(c.get("is_siege") or c.get("etablissementSiege")):
                 siret_siege = str(c.get("siret") or "").strip()
+                if not nom_ul:
+                    nom_ul = str(c.get("denomination_ul") or c.get("denomination") or "").strip()
                 break
 
     if pm_dirigeant:

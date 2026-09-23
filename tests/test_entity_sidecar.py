@@ -314,3 +314,66 @@ def test_run_entity_sidecar_matches_ssda():
     assert m.type_etablissement == "FILIALE"
     assert m.nom_holding == "SO NICE HOTELS HOLDING"
     assert m.siret_siege_holding == "38491117800042"
+
+
+def test_get_candidate_all_names_physical_person():
+    from src.xgb_matcher.sidecar import get_candidate_all_names
+    cand = {
+        "siret": "81059865600066",
+        "nom_ul": "DURAND DASTES",
+        "prenom_usuel_ul": "CLAIRE",
+        "enseigne1": "CABINET D'AVOCAT",
+    }
+    names = get_candidate_all_names(cand)
+    assert "CLAIRE DURAND DASTES" in names
+    assert "DURAND DASTES CLAIRE" in names
+    assert "DURAND DASTES" in names
+    assert "CABINET D'AVOCAT" in names
+
+
+def test_qualify_establishment_physical_person():
+    cand = {
+        "siret": "81059865600066",
+        "siren": "810598656",
+        "nom_ul": "DURAND DASTES",
+        "prenom_usuel_ul": "CLAIRE",
+        "is_siege": True,
+    }
+    match = qualify_establishment(cand)
+    assert match.siret_retenu == "81059865600066"
+    assert match.type_etablissement == "SIEGE"
+    assert match.nom_holding == "CLAIRE DURAND DASTES"
+
+
+def test_ssda_multi_tenant_token_specificity_tie_breaking():
+    # 2 automotive repair establishments at the exact same address (63 Avenue Cote Vermeille)
+    candidates = [
+        {
+            "siret": "89175624900019",
+            "nom_ul": "RODRIGUEZ",
+            "prenom_usuel_ul": "CHRISTOPHER",
+            "enseigne1": "GARAGE LAROQUE",
+            "numeroVoie": "63",
+            "typeVoie": "AVENUE",
+            "libelleVoie": "COTE VERMEILLE",
+            "activitePrincipaleEtablissement": "45.20A",  # Entretien et réparation de véhicules
+        },
+        {
+            "siret": "99999999900011",
+            "denomination": "SARL GARAGE COTE VERMEILLE",
+            "numeroVoie": "63",
+            "typeVoie": "AVENUE",
+            "libelleVoie": "COTE VERMEILLE",
+            "activitePrincipaleEtablissement": "45.20A",  # Same sector
+        }
+    ]
+
+    # Query with distinctive proper nouns 'RODRIGUEZ' and 'LAROQUE'
+    # Must break tie in favor of 89175624900019 instead of aborting
+    rescued = match_spatial_sectoral_dual_anchor(
+        crm_name="RODRIGUEZ GARAGE LAROQUE",
+        candidates=candidates,
+        crm_address="63 AVENUE COTE VERMEILLE",
+    )
+    assert rescued == {"89175624900019"}
+
