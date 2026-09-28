@@ -35,6 +35,8 @@ Analyses approfondies, métriques empiriques et revues de code composant par com
 * [`analysis/analysis_step1_partitioned_store.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/analysis/analysis_step1_partitioned_store.md) : Analyse de l'Étape 1 (Stockage Hive Parquet, manifeste $O(1)$, politique méga-communes, cache LRU).
 * [`analysis/analysis_step2_geo_benchmark_17k_baseline.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/analysis/analysis_step2_geo_benchmark_17k_baseline.md) : Analyse de l'Étape 2 (Benchmark Geo-Resolution 17k baseline, 97.18% base recall, zéro fuite).
 * [`analysis/audit_crm_increment_20260817.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/analysis/audit_crm_increment_20260817.md) : Audit qualité de l'incrément CRM (15 516 cas UNSEEN, zéro doublon SIREN, validation de fusion).
+* [`analysis/analysis_holding_reconciliation_benchmark_459.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/analysis/analysis_holding_reconciliation_benchmark_459.md) : Analyse qualifiée du benchmark réconciliation Établissement vs Holding (163/459 qualifiés, 4 colonnes).
+* [`analysis/analysis_step5l_geo_benchmark_32k_sidecar.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/analysis/analysis_step5l_geo_benchmark_32k_sidecar.md) : Rapport d'audit et validation Étape 5l (Benchmark National 32k avec Sidecar complet, 98.16% rappel actif @500, 99.90% base).
 
 ---
 
