@@ -230,17 +230,9 @@ FAST_RANKER_FEATURE_NAMES: List[str] = [
 ]
 
 
-# Association tokens for B1 rule
-ASSOCIATION_TOKENS: Set[str] = {
-    "ASSOCIATION", "ASSO", "FOYER", "AMICALE", "CONSEIL",
-    "PARENTS", "PARENT", "ELEVES", "SPORTIVE", "FSE", "SOCIO",
-}
-
-# School tokens for context detection (D11 and B1)
-SCHOOL_TOKENS: Set[str] = {
-    "COLLEGE", "CLG", "LYCEE", "LYCE", "ECOLE", "INSTITUT", "UNIVERSITE", 
-    "UFR", "FACULTE", "CTRE", "CENTRE", "FORMATION", "CFA", "MFR", "ACADEMY",
-}
+# Official INSEE Legal Classification (Generic, Data-Driven)
+# Associations are officially defined under INSEE category 92xx (9210, 9220, 9230, 9240, 9260)
+INSEE_ASSOCIATION_CJ_PREFIX: str = "92"
 
 
 # --------------------------------------------------------------------------- #
@@ -800,8 +792,9 @@ def preprocess_crm_row(crm_row: Mapping[str, Any]) -> Dict[str, Any]:
         if len(root_candidate) >= 3:
             crm_name_root = strip_location_from_crm_name({**dict(crm_row), "crm_name": root_candidate})
 
-    crm_tokens_all = set(crm_name.split())
-    is_crm_school = float(bool(crm_tokens_all & SCHOOL_TOKENS))
+    # Generic activity context is handled continuously by Pilier 3 NAF vector projection.
+    # Keyword-based school detection deprecated in favor of NAF 85.xx continuous embeddings.
+    is_crm_school = 0.0
 
     # D6: alias extraction (normalized, filtered)
     crm_raw = crm_row.get("crm_name", "")
@@ -1070,11 +1063,14 @@ def make_features_from_preprocessed(
     features["is_siege"] = float(cand.get("is_siege", False))
     
     # B2: is_copropriete - syndicate of co-owners indicator (cj_ul == '9110')
+    # Continuous feature fed to gradient boosting trees, coexisting with macro-category
+    # legal_form_category to allow continuous non-destructive weighting without arbitrary hard exclusions.
     features["is_copropriete"] = float(str(cand.get("cj_ul") or "").strip() == "9110")
     
-    # B1: is_association - check if candidate name contains association tokens
-    cand_name_tokens = set(normalize_text(primary_cand_name).split()) if primary_cand_name else set()
-    features["is_association"] = float(bool(cand_name_tokens & ASSOCIATION_TOKENS))
+    # B1: is_association - official INSEE legal category for associations (92xx)
+    # Generic, data-driven approach replacing fragile keyword lists
+    cand_cj = str(cand.get("cj_ul") or "").strip()
+    features["is_association"] = float(cand_cj.startswith(INSEE_ASSOCIATION_CJ_PREFIX))
     
     # D6: alias_match - check if aliases in parentheses match candidate name
     aliases = crm.get("aliases") or []

@@ -66,6 +66,10 @@
      - `type_etablissement` : Qualification de l'entité (`SIEGE`, `SECONDAIRE`, `FILIALE`).
      - `siret_siege_holding` : SIRET du siège social ou de la holding parente.
      - `nom_holding` : Raison sociale légale de la société mère / holding.
+8. **Assainissement ML Pré-Étape 6 & Bannissement des Heuristiques Post-Hoc** *(Commit `f935a85`)* :
+   - Éradication formelle de la règle post-hoc `_promote_open_over_closed` dans `infer.py` et `train_xgb_decider.py` : le classement est désormais 100% data-driven par le gradient boosting XGBoost sans aucune permutation manuelle.
+   - Élimination des listes statiques de tokens (`ASSOCIATION_TOKENS`, `SCHOOL_TOKENS` dans `features.py`) au profit de la classification officielle INSEE `cj_ul.startswith("92")` et de la projection continue vectorielle NAF.
+   - Validation mathématique de `is_copropriete` (`cj_ul == '9110'`) comme feature continue d'arbre complétée par la macro-catégorie `legal_form_category` sans exclusion dure.
 
 ---
 

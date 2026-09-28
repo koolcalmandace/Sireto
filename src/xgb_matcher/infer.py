@@ -475,7 +475,6 @@ class XgbInferenceEngine:
 
         sorted_idx = np.argsort(scores)[::-1]
         topk_idx = sorted_idx[:top_k].tolist()
-        topk_idx = self._promote_open_over_closed(topk_idx, cand_list_n)
 
         top1_score = float(scores[topk_idx[0]]) if topk_idx else 0.0
         top2_score = float(scores[topk_idx[1]]) if len(topk_idx) > 1 else 0.0
@@ -852,7 +851,6 @@ class XgbInferenceEngine:
         scores = np.array(probs)
         sorted_idx = np.argsort(scores)[::-1]
         topk_idx = sorted_idx[:top_k].tolist()
-        topk_idx = self._promote_open_over_closed(topk_idx, cand_list_n)
 
         top1_idx = topk_idx[0]
         top1_score = float(scores[top1_idx]) if topk_idx else 0.0
@@ -1057,44 +1055,8 @@ class XgbInferenceEngine:
         return result.candidates, result.idf_map, result.default_idf
 
     
-    @staticmethod
-    def _is_closed(cand: Dict[str, Any]) -> bool:
-        return str(cand.get("etat_admin") or "").strip().upper() == "F"
-
-    def _promote_open_over_closed(
-        self,
-        topk_idx: List[int],
-        cand_list_n: List[Tuple[str, Dict[str, Any]]],
-    ) -> List[int]:
-        """Promote open establishments when same SIREN has open/closed in top-k."""
-        if not topk_idx:
-            return topk_idx
-
-        order = list(topk_idx)
-        pos_by_idx = {idx: pos for pos, idx in enumerate(order)}
-        open_pos: Dict[str, int] = {}
-        closed_pos: Dict[str, int] = {}
-
-        for pos, idx in enumerate(order):
-            cand = cand_list_n[idx][1]
-            siren = str(cand.get("siren") or "").strip()
-            if not siren:
-                continue
-            if self._is_closed(cand):
-                closed_pos.setdefault(siren, pos)
-            else:
-                open_pos.setdefault(siren, pos)
-
-        for siren, c_pos in closed_pos.items():
-            o_pos = open_pos.get(siren)
-            if o_pos is None or c_pos >= o_pos:
-                continue
-            idx_closed = order[c_pos]
-            idx_open = order[o_pos]
-            order[c_pos], order[o_pos] = idx_open, idx_closed
-            pos_by_idx[idx_closed], pos_by_idx[idx_open] = o_pos, c_pos
-
-        return order
+    # Post-hoc permutation heuristics removed.
+    # Ranking is 100% data-driven and determined by the XGBoost decider model scores.
 
 
 @dataclass

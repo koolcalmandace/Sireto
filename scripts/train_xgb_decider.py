@@ -139,59 +139,8 @@ def compute_hit_at_k(y_true: np.ndarray, y_pred: np.ndarray, groups: np.ndarray,
     return hits / len(groups) if len(groups) else 0.0
 
 
-def _is_closed(etat_admin: object) -> bool:
-    return str(etat_admin or "").strip().upper() == "F"
-
-
-def _promote_open_over_closed(order: List[int], sirens: List[object], etat_admin: List[object]) -> List[int]:
-    if not order:
-        return order
-    open_pos: Dict[str, int] = {}
-    closed_pos: Dict[str, int] = {}
-    for pos, idx in enumerate(order):
-        siren = str(sirens[idx] or "").strip()
-        if not siren:
-            continue
-        if _is_closed(etat_admin[idx]):
-            closed_pos.setdefault(siren, pos)
-        else:
-            open_pos.setdefault(siren, pos)
-
-    order = list(order)
-    for siren, c_pos in closed_pos.items():
-        o_pos = open_pos.get(siren)
-        if o_pos is None or c_pos >= o_pos:
-            continue
-        order[c_pos], order[o_pos] = order[o_pos], order[c_pos]
-    return order
-
-
-def compute_hit_at_k_with_promotion(
-    df_sorted: pd.DataFrame,
-    y_true: np.ndarray,
-    y_pred: np.ndarray,
-    groups: np.ndarray,
-    k: int = 1,
-) -> float:
-    if "siren" not in df_sorted.columns or "etat_admin" not in df_sorted.columns:
-        return compute_hit_at_k(y_true, y_pred, groups, k=k)
-
-    sirens = df_sorted["siren"].tolist()
-    etat_admin = df_sorted["etat_admin"].tolist()
-
-    hits = 0
-    start = 0
-    for group_size in groups:
-        end = start + group_size
-        group_labels = y_true[start:end]
-        group_scores = y_pred[start:end]
-        order = np.argsort(group_scores)[::-1].tolist()
-        order = _promote_open_over_closed(order, sirens[start:end], etat_admin[start:end])
-        top_k_indices = order[:k]
-        if any(group_labels[i] == 1 for i in top_k_indices):
-            hits += 1
-        start = end
-    return hits / len(groups) if len(groups) else 0.0
+# Note: Post-hoc open/closed permutation heuristics have been eliminated.
+# Model evaluation strictly measures pure XGBoost decider ranking performance.
 
 
 def filter_topk_by_ranker(
