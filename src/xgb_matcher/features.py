@@ -1217,3 +1217,84 @@ def make_features(crm_row: pd.Series, cand: dict, skip_semantic: bool = False) -
     """Backward-compatible wrapper (builds CRM preprocessing on the fly)."""
     crm = preprocess_crm_row(crm_row)
     return make_features_from_preprocessed(crm, cand, skip_semantic=skip_semantic)
+
+
+# ---------------------------------------------------------------------------
+# Axe 2: Matrix Vector Blocks & Batch Representation
+# ---------------------------------------------------------------------------
+
+TEXT_FEATURE_NAMES: List[str] = [
+    "has_any_name", "name_count", "name_jaro_max", "name_jaro_second", "name_jaro_gap",
+    "name_levenshtein_max", "name_token_overlap_max", "idf_name", "numeric_token_match",
+    "name_first_word_match_max", "name_contains_crm_max", "name_crm_contains_cand_max",
+    "acronym_match_max", "name_sim_max_etab", "name_sim_max_ul", "name_sim_max_sigle",
+    "name_sim_max_pm_dirigeant", "type_of_max_name", "is_ul_name_max", "is_sigle_max",
+    "name_length_max", "has_person_name", "person_name_jaro_max", "name_city_overlap_max",
+    "name_is_city_like_max", "name_norm_exact", "alias_match", "token_overlap_ul",
+    "ul_vs_pm_indicator", "name_jaro_vs_enseigne", "name_city_suffix_match",
+]
+
+GEO_FEATURE_NAMES: List[str] = [
+    "addr_jaro", "addr_levenshtein", "postcode_match", "city_match",
+    "street_number_diff", "addr_token_overlap", "address_density",
+    "street_name_jaro", "geo_exact_match", "street_number_match",
+]
+
+ADMIN_FEATURE_NAMES: List[str] = [
+    "legal_form_category", "is_siege", "is_association", "is_copropriete", "is_crm_school",
+]
+
+INTERACTION_FEATURE_NAMES: List[str] = [
+    "name_addr_consistency", "addr_unsupported_by_name", "name_density_penalty",
+    "addr_jaro_per_density", "postcode_match_without_addr", "full_addr_match_score",
+]
+
+_IDX_TEXT = [FEATURE_NAMES.index(fn) for fn in TEXT_FEATURE_NAMES]
+_IDX_GEO = [FEATURE_NAMES.index(fn) for fn in GEO_FEATURE_NAMES]
+_IDX_ADMIN = [FEATURE_NAMES.index(fn) for fn in ADMIN_FEATURE_NAMES]
+_IDX_INTERACT = [FEATURE_NAMES.index(fn) for fn in INTERACTION_FEATURE_NAMES]
+
+
+def make_features_batch(
+    crm_pre: Dict[str, Any],
+    candidates: List[Dict[str, Any]],
+    skip_semantic: bool = False,
+) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+    """
+    Compute features for a batch of candidates for a single CRM query.
+    Returns:
+        features_matrix: np.ndarray of shape (N, len(FEATURE_NAMES))
+        vector_blocks: dict of sub-matrices {
+            "V_text": shape (N, 31),
+            "V_geo": shape (N, 10),
+            "V_admin": shape (N, 5),
+            "V_interact": shape (N, 6),
+        }
+    Strict mathematical parity: max difference vs scalar make_features_from_preprocessed is 0.0.
+    """
+    if not candidates:
+        empty_mat = np.zeros((0, len(FEATURE_NAMES)), dtype=np.float32)
+        return empty_mat, {
+            "V_text": empty_mat[:, _IDX_TEXT],
+            "V_geo": empty_mat[:, _IDX_GEO],
+            "V_admin": empty_mat[:, _IDX_ADMIN],
+            "V_interact": empty_mat[:, _IDX_INTERACT],
+        }
+
+    feats_list = [
+        make_features_from_preprocessed(crm_pre, cand, skip_semantic=skip_semantic)
+        for cand in candidates
+    ]
+    matrix = np.array(
+        [[f[fn] for fn in FEATURE_NAMES] for f in feats_list],
+        dtype=np.float32,
+    )
+
+    blocks = {
+        "V_text": matrix[:, _IDX_TEXT],
+        "V_geo": matrix[:, _IDX_GEO],
+        "V_admin": matrix[:, _IDX_ADMIN],
+        "V_interact": matrix[:, _IDX_INTERACT],
+    }
+    return matrix, blocks
+
