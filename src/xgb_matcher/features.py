@@ -63,6 +63,7 @@ def map_legal_to_category(legal_nature: str | None) -> str:
     return LEGAL_NATURE_MAPPING.get(legal_nature, "INCONNU")
 
 
+from .communes_nouvelles import resolve_commune_nouvelle
 from .naming import (
     CandidateName,
     NameSource,
@@ -181,6 +182,7 @@ FEATURE_NAMES: List[str] = [
     "name_jaro_vs_enseigne",       # Jaro between CRM name and establishment-level name (enseigne), not UL name
     "name_city_suffix_match",      # ratio of CRM city tokens appearing in candidate enseigne
     "is_copropriete",              # Syndicate of co-owners indicator (cj_ul == '9110')
+    "sidecar_match",               # 1.0 if identified by Sidecar (trade name, brand, SSDA anchor), 0.0 otherwise
 ]
 
 SEMANTIC_FEATURE_NAMES: List[str] = [
@@ -205,7 +207,6 @@ FAST_RANKER_FEATURE_SET: Set[str] = {
     "name_sim_max_ul",
     "name_sim_max_sigle",
     "name_sim_max_pm_dirigeant",
-    "type_of_max_name",
     "is_ul_name_max",
     "is_sigle_max",
     "name_length_max",
@@ -221,8 +222,9 @@ FAST_RANKER_FEATURE_SET: Set[str] = {
     "geo_exact_match",
     "name_norm_exact",
     "street_number_match",
-    "addr_unsupported_by_name",  # New V8: useful for Stage 1 to detect colocataires early
-    "name_jaro_vs_enseigne",     # New V8: useful for multi-site SIREN disambiguation
+    "name_jaro_vs_enseigne",
+    "alias_match",
+    "sidecar_match",
 }
 
 FAST_RANKER_FEATURE_NAMES: List[str] = [
@@ -1128,13 +1130,23 @@ def make_features_from_preprocessed(
     # V6 discriminant features
     # -------------------------------------------------------------------------
     
-    # geo_exact_match: INSEE CRM == INSEE candidat
+    # geo_exact_match: INSEE CRM == INSEE candidat (with Communes Nouvelles resolution)
     crm_insee = crm.get("insee")
     cand_insee = cand.get("codeCommuneEtablissement") or cand.get("insee")
     if crm_insee and cand_insee:
-        features["geo_exact_match"] = float(str(crm_insee).strip() == str(cand_insee).strip())
+        crm_s = str(crm_insee).strip()
+        cand_s = str(cand_insee).strip()
+        if crm_s == cand_s:
+            features["geo_exact_match"] = 1.0
+        else:
+            crm_res = resolve_commune_nouvelle(crm_s)
+            cand_res = resolve_commune_nouvelle(cand_s)
+            features["geo_exact_match"] = float(bool(crm_res and cand_res and crm_res == cand_res))
     else:
         features["geo_exact_match"] = 0.0
+
+    # Sidecar match indicator (Option A: feature-driven, trade name / SSDA anchor)
+    features["sidecar_match"] = float(bool(cand.get("_is_sidecar_match") or cand.get("is_sidecar_match")))
     
     # name_norm_exact: Exact match after normalization
     # Compare best candidate name (by jaro) to CRM name (both normalized)
@@ -1241,7 +1253,7 @@ GEO_FEATURE_NAMES: List[str] = [
 ]
 
 ADMIN_FEATURE_NAMES: List[str] = [
-    "legal_form_category", "is_siege", "is_association", "is_copropriete", "is_crm_school",
+    "legal_form_category", "is_siege", "is_association", "is_copropriete", "is_crm_school", "sidecar_match",
 ]
 
 INTERACTION_FEATURE_NAMES: List[str] = [

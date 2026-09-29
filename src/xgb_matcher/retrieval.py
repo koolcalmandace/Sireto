@@ -777,6 +777,12 @@ def build_candidate_pool(
         logger = logging.getLogger(__name__)
         logger.warning("siren_expansion_enabled=True but siren_to_geo not loaded — skipping expansion")
 
+    if whitelisted_sirets:
+        for c in candidates:
+            s = str(c.get("siret") or "").strip()
+            if s in whitelisted_sirets:
+                c["_is_sidecar_match"] = 1.0
+
     attach_address_density(candidates)
     result.prefilter_sirets = [str(c.get("siret") or "") for c in candidates if c.get("siret")]
     result.candidates = candidates
