@@ -37,6 +37,7 @@ Analyses approfondies, métriques empiriques et revues de code composant par com
 * [`analysis/audit_crm_increment_20260817.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/analysis/audit_crm_increment_20260817.md) : Audit qualité de l'incrément CRM (15 516 cas UNSEEN, zéro doublon SIREN, validation de fusion).
 * [`analysis/analysis_holding_reconciliation_benchmark_459.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/analysis/analysis_holding_reconciliation_benchmark_459.md) : Analyse qualifiée du benchmark réconciliation Établissement vs Holding (163/459 qualifiés, 4 colonnes).
 * [`analysis/analysis_step5l_geo_benchmark_32k_sidecar.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/analysis/analysis_step5l_geo_benchmark_32k_sidecar.md) : Rapport d'audit et validation Étape 5l (Benchmark National 32k avec Sidecar complet, 98.16% rappel actif @500, 99.90% base).
+* [`analysis/analysis_sirene_ceiling_and_pruned_cases_762.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/analysis/analysis_sirene_ceiling_and_pruned_cases_762.md) : **Rapport de Plafond Mécanique SIRENE & Audit Exhaustif des 762 Pertes TF-IDF** (Taxonomie détaillée, barrières légales RGPD `[ND]`, divergences enseignes, démonstration de la limite locale et justification du fallback Places).
 
 ---
 
