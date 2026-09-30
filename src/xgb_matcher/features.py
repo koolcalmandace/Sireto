@@ -183,6 +183,7 @@ FEATURE_NAMES: List[str] = [
     "name_city_suffix_match",      # ratio of CRM city tokens appearing in candidate enseigne
     "is_copropriete",              # Syndicate of co-owners indicator (cj_ul == '9110')
     "sidecar_match",               # 1.0 if identified by Sidecar (trade name, brand, SSDA anchor), 0.0 otherwise
+    "is_active",                   # 1.0 if establishment is active (etat_admin == 'A'), 0.0 otherwise
 ]
 
 SEMANTIC_FEATURE_NAMES: List[str] = [
@@ -225,6 +226,7 @@ FAST_RANKER_FEATURE_SET: Set[str] = {
     "name_jaro_vs_enseigne",
     "alias_match",
     "sidecar_match",
+    "is_active",
 }
 
 FAST_RANKER_FEATURE_NAMES: List[str] = [
@@ -1064,6 +1066,10 @@ def make_features_from_preprocessed(
     # D9: is_siege - head office indicator
     features["is_siege"] = float(cand.get("is_siege", False))
     
+    # is_active: factual activity indicator (1.0 if active 'A', 0.0 otherwise)
+    etat_val = str(cand.get("etat_admin") or cand.get("etatAdministratifEtablissement") or "").strip().upper()
+    features["is_active"] = float(etat_val == "A")
+    
     # B2: is_copropriete - syndicate of co-owners indicator (cj_ul == '9110')
     # Continuous feature fed to gradient boosting trees, coexisting with macro-category
     # legal_form_category to allow continuous non-destructive weighting without arbitrary hard exclusions.
@@ -1253,7 +1259,7 @@ GEO_FEATURE_NAMES: List[str] = [
 ]
 
 ADMIN_FEATURE_NAMES: List[str] = [
-    "legal_form_category", "is_siege", "is_association", "is_copropriete", "is_crm_school", "sidecar_match",
+    "legal_form_category", "is_siege", "is_association", "is_copropriete", "is_crm_school", "sidecar_match", "is_active",
 ]
 
 INTERACTION_FEATURE_NAMES: List[str] = [
