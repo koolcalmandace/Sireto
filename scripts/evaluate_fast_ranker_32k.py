@@ -364,165 +364,165 @@ def evaluate(
                     logger.warning("[SHUTDOWN] Extinction système détectée pendant la pause. Sortie propre.")
                     sys.exit(0)
                 logger.info("[CHECKPOINT] Reprise du batch après pause.")
-        crm_name = (r.get("crm_name") or r.get("Client final") or "").strip()
-        crm_addr = (r.get("crm_adresse") or r.get("crm_address") or r.get("Adresse") or "").strip()
-        crm_city = (r.get("crm_commune") or r.get("crm_city") or r.get("Commune") or "").strip()
-        postcode = (r.get("crm_cp") or r.get("postcode") or r.get("Code Postal") or "").strip().zfill(5)
-        insee = (r.get("crm_insee") or r.get("insee") or r.get("Code INSEE") or "").strip().zfill(5)
-        gt_siret = (r.get("gt_siret") or r.get("ground_truth_siret") or "").strip().zfill(14)
-        gt_etat = (r.get("sirene_etat") or r.get("etat_admin") or "A").strip().upper()
-
-        crm_row = {
-            "crm_id": crm_id,
-            "crm_name": crm_name,
-            "crm_address": crm_addr,
-            "crm_city": crm_city,
-            "postcode": postcode,
-            "insee": insee,
-        }
-        crm_pre = preprocess_crm_row(crm_row)
-
-        # 1. Retrieval K=500
-        pool_res = build_candidate_pool(
-            store=store,
-            crm_row=crm_row,
-            crm_pre=crm_pre,
-            config=config,
-            tfidf_cache=tfidf_cache,
-            gt_siret=gt_siret,
-            compute_idf_map=True,
-        )
-
-        candidates = pool_res.candidates or []
-        pool_size = len(candidates)
-        cand_sirets = [str(c.get("siret") or "").strip().zfill(14) for c in candidates]
-        gt_in_pool = gt_siret in cand_sirets if gt_siret else False
-
-        raw_rank = -1
-        retained_rank = -1
-        hit_1 = 0
-        hit_5 = 0
-        hit_10 = 0
-        hit_20 = 0
-        hit_50 = 0
-        loss_reason = ""
-
-        if candidates:
-            # 2. Fast Ranker Feature Computation (38 features)
-            set_global_name_idf_map(pool_res.idf_map, pool_res.default_idf)
-            base_matrix, _ = make_features_batch(
+            crm_name = (r.get("crm_name") or r.get("Client final") or "").strip()
+            crm_addr = (r.get("crm_adresse") or r.get("crm_address") or r.get("Adresse") or "").strip()
+            crm_city = (r.get("crm_commune") or r.get("crm_city") or r.get("Commune") or "").strip()
+            postcode = (r.get("crm_cp") or r.get("postcode") or r.get("Code Postal") or "").strip().zfill(5)
+            insee = (r.get("crm_insee") or r.get("insee") or r.get("Code INSEE") or "").strip().zfill(5)
+            gt_siret = (r.get("gt_siret") or r.get("ground_truth_siret") or "").strip().zfill(14)
+            gt_etat = (r.get("sirene_etat") or r.get("etat_admin") or "A").strip().upper()
+    
+            crm_row = {
+                "crm_id": crm_id,
+                "crm_name": crm_name,
+                "crm_address": crm_addr,
+                "crm_city": crm_city,
+                "postcode": postcode,
+                "insee": insee,
+            }
+            crm_pre = preprocess_crm_row(crm_row)
+    
+            # 1. Retrieval K=500
+            pool_res = build_candidate_pool(
+                store=store,
+                crm_row=crm_row,
                 crm_pre=crm_pre,
-                candidates=candidates,
-                skip_semantic=True,
+                config=config,
+                tfidf_cache=tfidf_cache,
+                gt_siret=gt_siret,
+                compute_idf_map=True,
             )
-            feat_matrix = base_matrix[:, fast_indices].astype(np.float32)
-
-            # 3. XGBoost Scoring
-            dmat = xgb.DMatrix(feat_matrix, feature_names=FAST_RANKER_FEATURE_NAMES)
-            scores = booster.predict(dmat)
-
-            # 4. Pure XGBoost Ranking
-            pure_order = list(np.argsort(-scores))
-            if gt_in_pool:
-                for rank_pos, c_idx in enumerate(pure_order, start=1):
-                    if cand_sirets[c_idx] == gt_siret:
-                        raw_rank = rank_pos
-                        break
-
-            # 5. Top-K Retention (Headquarters + Sidecar Protection)
-            retained_indices, retained_sirets = apply_retention_topk(
-                candidates=candidates,
-                scores=scores,
-                top_k=top_k,
-            )
-
-            if gt_in_pool:
-                if gt_siret in retained_sirets:
-                    retained_rank = retained_sirets.index(gt_siret) + 1
-                    hit_50 = 1
-                    if retained_rank <= 20:
-                        hit_20 = 1
-                    if retained_rank <= 10:
-                        hit_10 = 1
-                    if retained_rank <= 5:
-                        hit_5 = 1
-                    if retained_rank == 1:
-                        hit_1 = 1
-                else:
-                    retained_rank = raw_rank
-                    loss_reason = f"PRUNED_BY_FAST_RANKER_RANK_{raw_rank}"
-        else:
-            loss_reason = pool_res.loss_reason or "EMPTY_POOL"
-
-        if not gt_in_pool and not loss_reason:
-            loss_reason = pool_res.loss_reason or "NOT_IN_PREFILTER_POOL"
-
-        # Mise à jour compteurs
-        total_processed += 1
-        is_active = (gt_etat == "A")
-        if is_active:
-            n_active += 1
-            if gt_in_pool:
-                act_gt_in_pool += 1
-            act_hit1 += hit_1
-            act_hit5 += hit_5
-            act_hit10 += hit_10
-            act_hit20 += hit_20
-            act_hit50 += hit_50
-        else:
-            n_closed += 1
-
-        all_gt_in_pool += int(gt_in_pool)
-        all_hit1 += hit_1
-        all_hit5 += hit_5
-        all_hit10 += hit_10
-        all_hit20 += hit_20
-        all_hit50 += hit_50
-
-        # Enregistrement CSV détail
-        ckpt.record_detail({
-            "crm_id": crm_id,
-            "crm_name": crm_name,
-            "crm_insee": insee,
-            "crm_cp": postcode,
-            "gt_siret": gt_siret,
-            "gt_etat": gt_etat,
-            "pool_size": pool_size,
-            "gt_in_pool": int(gt_in_pool),
-            "raw_rank": raw_rank,
-            "retained_rank": retained_rank,
-            "hit_1": hit_1,
-            "hit_5": hit_5,
-            "hit_10": hit_10,
-            "hit_20": hit_20,
-            "hit_50": hit_50,
-            "loss_reason": loss_reason if hit_50 == 0 else "",
-        })
-
-        if len(tfidf_cache) > 40:
-            tfidf_cache.popitem(last=False)
-        memory_gov.check_and_release(store=store, tfidf_cache=tfidf_cache)
-
-        if (i + 1) % checkpoint_interval == 0 or (i + 1) == len(eval_rows):
-            elapsed = time.perf_counter() - t_start
-            rate = (i + 1) / max(elapsed, 0.001)
-            rss_gb = memory_gov.get_rss_gb()
-            ckpt.step(crm_id, {})
-            ckpt.flush_csv()
-
-            act_ret = (act_hit50 / max(act_gt_in_pool, 1)) * 100
-            act_rec = (act_hit50 / max(n_active, 1)) * 100
-
-            logger.info(
-                "[%d/%d] %.1f%% | Vitesse: %.1f req/s | RAM: %.2f Go | Actifs Hit@50: %.2f%% (Rétention: %.2f%%)",
-                total_processed,
-                len(rows),
-                (total_processed / max(len(rows), 1)) * 100,
-                rate,
-                rss_gb,
-                act_rec,
-                act_ret,
-            )
+    
+            candidates = pool_res.candidates or []
+            pool_size = len(candidates)
+            cand_sirets = [str(c.get("siret") or "").strip().zfill(14) for c in candidates]
+            gt_in_pool = gt_siret in cand_sirets if gt_siret else False
+    
+            raw_rank = -1
+            retained_rank = -1
+            hit_1 = 0
+            hit_5 = 0
+            hit_10 = 0
+            hit_20 = 0
+            hit_50 = 0
+            loss_reason = ""
+    
+            if candidates:
+                # 2. Fast Ranker Feature Computation (38 features)
+                set_global_name_idf_map(pool_res.idf_map, pool_res.default_idf)
+                base_matrix, _ = make_features_batch(
+                    crm_pre=crm_pre,
+                    candidates=candidates,
+                    skip_semantic=True,
+                )
+                feat_matrix = base_matrix[:, fast_indices].astype(np.float32)
+    
+                # 3. XGBoost Scoring
+                dmat = xgb.DMatrix(feat_matrix, feature_names=FAST_RANKER_FEATURE_NAMES)
+                scores = booster.predict(dmat)
+    
+                # 4. Pure XGBoost Ranking
+                pure_order = list(np.argsort(-scores))
+                if gt_in_pool:
+                    for rank_pos, c_idx in enumerate(pure_order, start=1):
+                        if cand_sirets[c_idx] == gt_siret:
+                            raw_rank = rank_pos
+                            break
+    
+                # 5. Top-K Retention (Headquarters + Sidecar Protection)
+                retained_indices, retained_sirets = apply_retention_topk(
+                    candidates=candidates,
+                    scores=scores,
+                    top_k=top_k,
+                )
+    
+                if gt_in_pool:
+                    if gt_siret in retained_sirets:
+                        retained_rank = retained_sirets.index(gt_siret) + 1
+                        hit_50 = 1
+                        if retained_rank <= 20:
+                            hit_20 = 1
+                        if retained_rank <= 10:
+                            hit_10 = 1
+                        if retained_rank <= 5:
+                            hit_5 = 1
+                        if retained_rank == 1:
+                            hit_1 = 1
+                    else:
+                        retained_rank = raw_rank
+                        loss_reason = f"PRUNED_BY_FAST_RANKER_RANK_{raw_rank}"
+            else:
+                loss_reason = pool_res.loss_reason or "EMPTY_POOL"
+    
+            if not gt_in_pool and not loss_reason:
+                loss_reason = pool_res.loss_reason or "NOT_IN_PREFILTER_POOL"
+    
+            # Mise à jour compteurs
+            total_processed += 1
+            is_active = (gt_etat == "A")
+            if is_active:
+                n_active += 1
+                if gt_in_pool:
+                    act_gt_in_pool += 1
+                act_hit1 += hit_1
+                act_hit5 += hit_5
+                act_hit10 += hit_10
+                act_hit20 += hit_20
+                act_hit50 += hit_50
+            else:
+                n_closed += 1
+    
+            all_gt_in_pool += int(gt_in_pool)
+            all_hit1 += hit_1
+            all_hit5 += hit_5
+            all_hit10 += hit_10
+            all_hit20 += hit_20
+            all_hit50 += hit_50
+    
+            # Enregistrement CSV détail
+            ckpt.record_detail({
+                "crm_id": crm_id,
+                "crm_name": crm_name,
+                "crm_insee": insee,
+                "crm_cp": postcode,
+                "gt_siret": gt_siret,
+                "gt_etat": gt_etat,
+                "pool_size": pool_size,
+                "gt_in_pool": int(gt_in_pool),
+                "raw_rank": raw_rank,
+                "retained_rank": retained_rank,
+                "hit_1": hit_1,
+                "hit_5": hit_5,
+                "hit_10": hit_10,
+                "hit_20": hit_20,
+                "hit_50": hit_50,
+                "loss_reason": loss_reason if hit_50 == 0 else "",
+            })
+    
+            if len(tfidf_cache) > 40:
+                tfidf_cache.popitem(last=False)
+            memory_gov.check_and_release(store=store, tfidf_cache=tfidf_cache)
+    
+            if (i + 1) % checkpoint_interval == 0 or (i + 1) == len(eval_rows):
+                elapsed = time.perf_counter() - t_start
+                rate = (i + 1) / max(elapsed, 0.001)
+                rss_gb = memory_gov.get_rss_gb()
+                ckpt.step(crm_id, {})
+                ckpt.flush_csv()
+    
+                act_ret = (act_hit50 / max(act_gt_in_pool, 1)) * 100
+                act_rec = (act_hit50 / max(n_active, 1)) * 100
+    
+                logger.info(
+                    "[%d/%d] %.1f%% | Vitesse: %.1f req/s | RAM: %.2f Go | Actifs Hit@50: %.2f%% (Rétention: %.2f%%)",
+                    total_processed,
+                    len(rows),
+                    (total_processed / max(len(rows), 1)) * 100,
+                    rate,
+                    rss_gb,
+                    act_rec,
+                    act_ret,
+                )
 
     finally:
         if enable_power_monitor:
