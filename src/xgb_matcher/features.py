@@ -227,6 +227,8 @@ FAST_RANKER_FEATURE_SET: Set[str] = {
     "alias_match",
     "sidecar_match",
     "is_active",
+    "is_siege",
+    "addr_unsupported_by_name",
 }
 
 FAST_RANKER_FEATURE_NAMES: List[str] = [

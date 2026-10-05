@@ -506,6 +506,7 @@ def build_candidate_pool(
 
     # Step 3: Universal rescue whitelist (addr_hash with density guard + numeric tokens + public expansion)
     whitelisted_sirets: set[str] = set()
+    sidecar_rescued_sirets: set[str] = set()
     if pool_list:
         # 3a. Address rescue with density guard
         # Universal density cap: 10 if exact street number is present, 5 otherwise
@@ -590,6 +591,7 @@ def build_candidate_pool(
                 )
                 if sidecar_sirets:
                     whitelisted_sirets.update(sidecar_sirets)
+                    sidecar_rescued_sirets.update(sidecar_sirets)
             except Exception as e:
                 _logger.debug("Sidecar rescue skipped or error: %s", e)
 
@@ -777,10 +779,10 @@ def build_candidate_pool(
         logger = logging.getLogger(__name__)
         logger.warning("siren_expansion_enabled=True but siren_to_geo not loaded — skipping expansion")
 
-    if whitelisted_sirets:
+    if sidecar_rescued_sirets:
         for c in candidates:
             s = str(c.get("siret") or "").strip()
-            if s in whitelisted_sirets:
+            if s in sidecar_rescued_sirets:
                 c["_is_sidecar_match"] = 1.0
 
     attach_address_density(candidates)
