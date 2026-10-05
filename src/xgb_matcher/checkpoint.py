@@ -315,6 +315,27 @@ class CheckpointManager:
         if self._unsaved_updates >= self.save_interval:
             self.save(status="IN_PROGRESS")
 
+    def record_detail(self, detail_row: Dict[str, Any]) -> None:
+        """Stream a single detail row to details CSV."""
+        if self._details_csv_writer and self._details_file_handle:
+            self._details_csv_writer.writerow(detail_row)
+            self._details_file_handle.flush()
+
+    def flush_csv(self) -> None:
+        """Flush streaming details file handle to disk."""
+        if self._details_file_handle:
+            try:
+                self._details_file_handle.flush()
+            except Exception:
+                pass
+
+    def step(self, idx: Any = None, data: Optional[Dict[str, Any]] = None) -> None:
+        """Record an incremental step and save checkpoint."""
+        if idx is not None and isinstance(idx, int):
+            self.last_processed_idx = idx
+        self._unsaved_updates += 1
+        self.save(status="IN_PROGRESS", force=True)
+
     def save(self, status: str = "IN_PROGRESS", force: bool = False) -> None:
         """Atomically persist current state to disk."""
         if not force and self._unsaved_updates == 0 and status == self.status:

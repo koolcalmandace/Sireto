@@ -280,6 +280,8 @@ def evaluate(
         pause_on_lock=pause_on_lock,
         idle_timeout_seconds=idle_timeout_seconds,
     )
+    if enable_power_monitor:
+        power_mon.start()
 
     # Accumulateurs de métriques
     total_processed = len(processed_crm_ids)
@@ -343,14 +345,25 @@ def evaluate(
     t_start = time.perf_counter()
     logger.info("Démarrage de l'évaluation...")
 
-    for i, r in enumerate(eval_rows):
-        if enable_power_monitor:
-            power_mon.check_power_events(
-                on_pause=lambda: [ckpt.flush_csv(), gc.collect()],
-                on_resume=lambda: logger.info("Reprise après événement PowerGuard."),
-            )
-
-        crm_id = (r.get("crm_id") or r.get("id") or str(i)).strip()
+    try:
+        for i, r in enumerate(eval_rows):
+            crm_id = (r.get("crm_id") or r.get("id") or str(i)).strip()
+            if enable_power_monitor and power_mon.should_exit():
+                logger.warning("[SHUTDOWN] Extinction système détectée. Sauvegarde et sortie propre...")
+                memory_gov.release_memory(store=store, tfidf_cache=tfidf_cache, reason="SHUTDOWN")
+                ckpt.step(crm_id, {})
+                ckpt.flush_csv()
+                sys.exit(0)
+            elif enable_power_monitor and power_mon.should_pause():
+                logger.info("[CHECKPOINT] Mise en pause propre du batch...")
+                memory_gov.release_memory(store=store, tfidf_cache=tfidf_cache, reason="POWER_PAUSE")
+                ckpt.step(crm_id, {})
+                ckpt.flush_csv()
+                power_mon.wait_for_resume()
+                if power_mon.should_exit():
+                    logger.warning("[SHUTDOWN] Extinction système détectée pendant la pause. Sortie propre.")
+                    sys.exit(0)
+                logger.info("[CHECKPOINT] Reprise du batch après pause.")
         crm_name = (r.get("crm_name") or r.get("Client final") or "").strip()
         crm_addr = (r.get("crm_adresse") or r.get("crm_address") or r.get("Adresse") or "").strip()
         crm_city = (r.get("crm_commune") or r.get("crm_city") or r.get("Commune") or "").strip()
@@ -511,6 +524,10 @@ def evaluate(
                 act_ret,
             )
 
+    finally:
+        if enable_power_monitor:
+            power_mon.stop()
+
     # Synthèse Finale
     summary = {
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -542,6 +559,8 @@ def evaluate(
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
+    ckpt.finalize_completed(summary)
+
     logger.info("=" * 80)
     logger.info("BENCHMARK TERMINÉ AVEC SUCCÈS")
     logger.info("Rapport résumé : %s", summary_path)
@@ -564,10 +583,13 @@ def main():
     parser.add_argument("--checkpoint-interval", type=int, default=250)
     parser.add_argument("--resume", action="store_true", default=True)
     parser.add_argument("--fresh", action="store_true", default=False)
+    parser.add_argument("--max-rows", type=int, default=None, help="Limite le nombre de requêtes à évaluer")
     parser.add_argument("--log-file", type=Path, default=Path("logs/fast_ranker_32k.log"))
     args = parser.parse_args()
 
     rows = load_crm_gt(args.crm)
+    if args.max_rows is not None and args.max_rows > 0:
+        rows = rows[:args.max_rows]
     evaluate(
         rows=rows,
         partitions_dir=args.partitions_dir,
