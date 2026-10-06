@@ -69,12 +69,12 @@ class RetentionGuardConfig:
 
 
 def _extract_tokens(text: str, min_len: int = 3) -> Set[str]:
-    """Helper to tokenize normalized text, removing common stopwords."""
+    """Helper to tokenize text on alphanumeric word boundaries, removing common stopwords."""
     if not text:
         return set()
-    norm = normalize_text(str(text))
+    tokens = re.findall(r"[A-Z0-9]+", str(text).upper())
     return {
-        tok for tok in norm.split()
+        tok for tok in tokens
         if len(tok) >= min_len and tok not in NAME_STOPWORDS and not tok.isdigit()
     }
 
@@ -167,22 +167,28 @@ def apply_retention_topk(
 
         # Rule A: Siège Social of an already active SIREN in top_k
         if is_siege and siren in siren_counts:
-            tail_candidates_to_promote.append((cand_idx, "SIEGE_RETENTION"))
+            tail_candidates_to_promote.append((10.0 + float(scores[cand_idx]), cand_idx, "SIEGE_RETENTION"))
             seen_promoted.add(cand_idx)
             continue
 
-        # Rule B: Validated Sidecar match
+        # Rule B: Validated Sidecar match (highest priority)
         if is_sidecar:
-            tail_candidates_to_promote.append((cand_idx, "SIDECAR_RETENTION"))
+            tail_candidates_to_promote.append((100.0 + float(scores[cand_idx]), cand_idx, "SIDECAR_RETENTION"))
             seen_promoted.add(cand_idx)
             continue
 
         # Rule C: Guard 3 - IDF Specificity Anchor (rare distinct token shared with CRM)
         cand_name_fields = [
+            c.get("denomination"),
+            c.get("denomination_ul"),
             c.get("denominationUniteLegale"),
-            c.get("nomUniteLegale"),
+            c.get("enseigne1"),
             c.get("enseigne1Etablissement"),
             c.get("denominationUsuelleEtablissement"),
+            c.get("nom_ul"),
+            c.get("nomUniteLegale"),
+            c.get("prenom_usuel_ul"),
+            c.get("sigle"),
             c.get("sigleUniteLegale"),
         ]
         cand_text = " ".join(str(f) for f in cand_name_fields if f)
@@ -190,6 +196,7 @@ def apply_retention_topk(
 
         overlap_tokens = crm_tokens & cand_tokens
         has_rare_token = False
+        max_idf = 0.0
         if overlap_tokens and effective_idf_map:
             max_idf = max(effective_idf_map.get(tok, _GLOBAL_NAME_IDF_DEFAULT) for tok in overlap_tokens)
             if max_idf >= cfg.idf_anchor_min:
@@ -200,7 +207,7 @@ def apply_retention_topk(
             name_jaro = jaro_sim(crm_name, normalize_name(cand_text))
 
         if has_rare_token:
-            tail_candidates_to_promote.append((cand_idx, "IDF_ANCHOR_RETENTION"))
+            tail_candidates_to_promote.append((50.0 + max_idf, cand_idx, "IDF_ANCHOR_RETENTION"))
             seen_promoted.add(cand_idx)
             continue
 
@@ -208,12 +215,15 @@ def apply_retention_topk(
         if name_jaro >= cfg.name_rescue_jaro_min:
             postcode_m = _get_val(cand_idx, "postcode_match", "postcode_match", 1.0)
             if postcode_m >= 1.0:
-                tail_candidates_to_promote.append((cand_idx, "HIGH_NAME_RESCUE"))
+                tail_candidates_to_promote.append((30.0 + name_jaro * 10.0, cand_idx, "HIGH_NAME_RESCUE"))
                 seen_promoted.add(cand_idx)
                 continue
 
     if not tail_candidates_to_promote:
         return selected_indices, selected_sirets
+
+    # Sort candidates to promote by priority descending (strongest signal first)
+    tail_candidates_to_promote.sort(key=lambda x: x[0], reverse=True)
 
     # -------------------------------------------------------------------------
     # 2. Identify Eviction Candidates within Current Top-K (Guards 1 & 2)
@@ -297,8 +307,7 @@ def apply_retention_topk(
     # -------------------------------------------------------------------------
     final_indices = list(selected_indices)
     swaps_applied = 0
-
-    for cand_idx, reason in tail_candidates_to_promote:
+    for priority, cand_idx, reason in tail_candidates_to_promote:
         if swaps_applied >= cfg.max_swaps:
             break
         if not eviction_priority_slots:
