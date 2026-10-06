@@ -85,80 +85,10 @@ def cluster_rows_by_locality(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     return sorted(rows, key=_geo_key)
 
 
-def apply_retention_topk(
-    candidates: List[Dict[str, Any]],
-    scores: np.ndarray,
-    top_k: int = 50,
-) -> Tuple[List[int], List[str]]:
-    """
-    Ranks candidates by XGBoost score and applies retention safeguards:
-    1. Siège Social preservation: if a SIREN is already selected in top_k, ensure its
-       head office establishment is included in the top_k budget.
-    2. Sidecar Anchor preservation: if a candidate was rescued via genuine Sidecar match,
-       ensure it is retained in the top_k budget.
-    Returns:
-        retained_indices: list of candidate indices in final rank order (length <= top_k)
-        retained_sirets: list of 14-digit SIRETs
-    """
-    n_cands = len(candidates)
-    if n_cands <= top_k:
-        order = list(np.argsort(-scores))
-        return order, [str(candidates[i].get("siret") or "").strip().zfill(14) for i in order]
-
-    order = list(np.argsort(-scores))
-    selected_indices = list(order[:top_k])
-    selected_sirets = [str(candidates[i].get("siret") or "").strip().zfill(14) for i in selected_indices]
-    selected_sirens = {s[:9] for s in selected_sirets if len(s) >= 9}
-
-    # Inspect candidates ranked between top_k and min(n_cands, 200) for retention candidates
-    candidates_to_protect = []
-    for rank_idx in range(top_k, min(n_cands, 200)):
-        cand_idx = order[rank_idx]
-        c = candidates[cand_idx]
-        s = str(c.get("siret") or "").strip().zfill(14)
-        siren = s[:9]
-
-        is_siege = bool(c.get("is_siege", False))
-        is_sidecar = bool(c.get("_is_sidecar_match") or c.get("is_sidecar_match"))
-
-        # Rule 1: Siège Social of an already active SIREN
-        if is_siege and siren in selected_sirens:
-            candidates_to_protect.append((cand_idx, "SIEGE_RETENTION"))
-            continue
-
-        # Rule 2: Validated Sidecar match
-        if is_sidecar:
-            candidates_to_protect.append((cand_idx, "SIDECAR_RETENTION"))
-            continue
-
-    if not candidates_to_protect:
-        return selected_indices, selected_sirets
-
-    # Safely swap protected candidates into the bottom of the budget,
-    # replacing lower-ranked secondary annexes of multi-site SIRENs
-    final_indices = list(selected_indices)
-    protected_added = 0
-
-    for cand_idx, reason in candidates_to_protect:
-        if protected_added >= 5:  # Cap retention replacements to max 5 slots
-            break
-        # Find candidate from the bottom of the top_k that is not a siege and not a sidecar
-        replace_slot = None
-        for slot in range(top_k - 1, 0, -1):
-            cur_idx = final_indices[slot]
-            cur_c = candidates[cur_idx]
-            cur_siege = bool(cur_c.get("is_siege", False))
-            cur_sidecar = bool(cur_c.get("_is_sidecar_match") or cur_c.get("is_sidecar_match"))
-            if not cur_siege and not cur_sidecar:
-                replace_slot = slot
-                break
-
-        if replace_slot is not None:
-            final_indices[replace_slot] = cand_idx
-            protected_added += 1
-
-    final_sirets = [str(candidates[i].get("siret") or "").strip().zfill(14) for i in final_indices]
-    return final_indices, final_sirets
+from src.xgb_matcher.retention import (
+    RetentionGuardConfig,
+    apply_retention_topk,
+)
 
 
 def evaluate(
@@ -429,11 +359,15 @@ def evaluate(
                             raw_rank = rank_pos
                             break
     
-                # 5. Top-K Retention (Headquarters + Sidecar Protection)
+                # 5. Top-K Retention (Guards 1, 2, 3: Intra-SIREN, Density, IDF Anchor)
                 retained_indices, retained_sirets = apply_retention_topk(
                     candidates=candidates,
                     scores=scores,
                     top_k=top_k,
+                    feat_matrix=feat_matrix,
+                    feature_names=FAST_RANKER_FEATURE_NAMES,
+                    crm_row=crm_row,
+                    name_idf_map=pool_res.idf_map,
                 )
     
                 if gt_in_pool:
