@@ -291,7 +291,7 @@ def apply_retention_topk(
         if density >= cfg.density_threshold and name_jaro < cfg.density_name_jaro_min and tok_overlap == 0.0:
             eviction_priority_slots.append(slot)
 
-    # 2C. Fallback: Bottom slots of top-k without siege or sidecar protection
+    # 2C. Fallback: Bottom slots of top-k without siege, sidecar, or strong name protection
     for slot in range(cfg.top_k - 1, 0, -1):
         if slot in eviction_priority_slots:
             continue
@@ -299,7 +299,11 @@ def apply_retention_topk(
         cand = candidates[c_idx]
         is_siege = bool(cand.get("is_siege", False)) or (_get_val(c_idx, "is_siege", "is_siege") == 1.0)
         is_sidecar = bool(cand.get("_is_sidecar_match") or cand.get("is_sidecar_match"))
-        if not is_siege and not is_sidecar:
+        name_jaro = _get_val(c_idx, "name_jaro_max", "name_jaro_max", 0.0)
+        tok_overlap = _get_val(c_idx, "name_token_overlap_max", "name_token_overlap_max", 0.0)
+        has_name_signal = (name_jaro >= 0.70) or (tok_overlap > 0.0)
+
+        if not is_siege and not is_sidecar and not has_name_signal:
             eviction_priority_slots.append(slot)
 
     # -------------------------------------------------------------------------
