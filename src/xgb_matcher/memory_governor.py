@@ -139,6 +139,14 @@ class MemoryGovernor:
             except Exception:
                 pass
 
+        try:
+            from .features import get_spatial_resolver
+            sp_res = get_spatial_resolver()
+            if sp_res is not None:
+                sp_res.clear_cache()
+        except Exception:
+            pass
+
         # Tier 2: Generational Garbage Collection
         gc.collect(2)
 

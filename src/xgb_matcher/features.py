@@ -184,6 +184,11 @@ FEATURE_NAMES: List[str] = [
     "is_copropriete",              # Syndicate of co-owners indicator (cj_ul == '9110')
     "sidecar_match",               # 1.0 if identified by Sidecar (trade name, brand, SSDA anchor), 0.0 otherwise
     "is_active",                   # 1.0 if establishment is active (etat_admin == 'A'), 0.0 otherwise
+    # BAN spatial features (Base Adresse Nationale continuous GPS coordinates)
+    "spatial_distance_km",        # Equirectangular GPS distance between CRM and candidate address (km, 0.0 to 99.0)
+    "spatial_is_very_close",      # 1.0 if distance < 0.100 km (~100m), 0.0 otherwise
+    "spatial_is_same_block",      # 1.0 if distance < 0.300 km (~300m), 0.0 otherwise
+    "spatial_has_coords",         # 1.0 if both CRM and candidate addresses geocoded successfully, 0.0 otherwise
 ]
 
 SEMANTIC_FEATURE_NAMES: List[str] = [
@@ -229,6 +234,10 @@ FAST_RANKER_FEATURE_SET: Set[str] = {
     "is_active",
     "is_siege",
     "addr_unsupported_by_name",
+    "spatial_distance_km",
+    "spatial_is_very_close",
+    "spatial_is_same_block",
+    "spatial_has_coords",
 }
 
 FAST_RANKER_FEATURE_NAMES: List[str] = [
@@ -820,9 +829,11 @@ def preprocess_crm_row(crm_row: Mapping[str, Any]) -> Dict[str, Any]:
         "crm_city": crm_city,
         "crm_city_norm": normalize_text(crm_city),
         "crm_street_num": extract_street_number(crm_address_raw),
-        "crm_street_name": extract_street_name_from_address(crm_address_norm),
-        "postcode": crm_row.get("postcode"),
-        "insee": crm_row.get("insee"),
+        "postcode": crm_row.get("postcode") or crm_row.get("crm_cp"),
+        "insee": crm_row.get("insee") or crm_row.get("crm_insee"),
+        "crm_insee": crm_row.get("crm_insee") or crm_row.get("insee"),
+        "crm_cp": crm_row.get("crm_cp") or crm_row.get("postcode"),
+        "crm_address": crm_address_raw,
         "aliases": aliases,
         "crm_tokens": crm_tokens,
         "is_crm_school": is_crm_school,
@@ -1230,7 +1241,30 @@ def make_features_from_preprocessed(
         city_in_enseigne = 0.0
     features["name_city_suffix_match"] = city_in_enseigne
 
+    # BAN spatial features default (for isolated/single calls)
+    features["spatial_distance_km"] = 99.0
+    features["spatial_is_very_close"] = 0.0
+    features["spatial_is_same_block"] = 0.0
+    features["spatial_has_coords"] = 0.0
+
     return features
+
+
+_SPATIAL_RESOLVER = None
+
+
+def get_spatial_resolver():
+    """Module-level singleton for BAN SpatialResolver."""
+    global _SPATIAL_RESOLVER
+    if _SPATIAL_RESOLVER is None:
+        try:
+            from .spatial import SpatialResolver
+            res = SpatialResolver()
+            if res.is_available:
+                _SPATIAL_RESOLVER = res
+        except Exception:
+            _SPATIAL_RESOLVER = None
+    return _SPATIAL_RESOLVER
 
 
 def make_features(crm_row: pd.Series, cand: dict, skip_semantic: bool = False) -> Dict[str, float]:
@@ -1260,6 +1294,13 @@ GEO_FEATURE_NAMES: List[str] = [
     "street_name_jaro", "geo_exact_match", "street_number_match",
 ]
 
+SPATIAL_FEATURE_NAMES: List[str] = [
+    "spatial_distance_km",
+    "spatial_is_very_close",
+    "spatial_is_same_block",
+    "spatial_has_coords",
+]
+
 ADMIN_FEATURE_NAMES: List[str] = [
     "legal_form_category", "is_siege", "is_association", "is_copropriete", "is_crm_school", "sidecar_match", "is_active",
 ]
@@ -1271,6 +1312,7 @@ INTERACTION_FEATURE_NAMES: List[str] = [
 
 _IDX_TEXT = [FEATURE_NAMES.index(fn) for fn in TEXT_FEATURE_NAMES]
 _IDX_GEO = [FEATURE_NAMES.index(fn) for fn in GEO_FEATURE_NAMES]
+_IDX_SPATIAL = [FEATURE_NAMES.index(fn) for fn in SPATIAL_FEATURE_NAMES]
 _IDX_ADMIN = [FEATURE_NAMES.index(fn) for fn in ADMIN_FEATURE_NAMES]
 _IDX_INTERACT = [FEATURE_NAMES.index(fn) for fn in INTERACTION_FEATURE_NAMES]
 
@@ -1279,6 +1321,7 @@ def make_features_batch(
     crm_pre: Dict[str, Any],
     candidates: List[Dict[str, Any]],
     skip_semantic: bool = False,
+    spatial_resolver: Optional[Any] = None,
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
     """
     Compute features for a batch of candidates for a single CRM query.
@@ -1287,8 +1330,9 @@ def make_features_batch(
         vector_blocks: dict of sub-matrices {
             "V_text": shape (N, 31),
             "V_geo": shape (N, 10),
-            "V_admin": shape (N, 5),
+            "V_admin": shape (N, 7),
             "V_interact": shape (N, 6),
+            "V_spatial": shape (N, 4),
         }
     Strict mathematical parity: max difference vs scalar make_features_from_preprocessed is 0.0.
     """
@@ -1297,6 +1341,7 @@ def make_features_batch(
         return empty_mat, {
             "V_text": empty_mat[:, _IDX_TEXT],
             "V_geo": empty_mat[:, _IDX_GEO],
+            "V_spatial": empty_mat[:, _IDX_SPATIAL],
             "V_admin": empty_mat[:, _IDX_ADMIN],
             "V_interact": empty_mat[:, _IDX_INTERACT],
         }
@@ -1310,9 +1355,18 @@ def make_features_batch(
         dtype=np.float32,
     )
 
+    resolver = spatial_resolver if spatial_resolver is not None else get_spatial_resolver()
+    if resolver and resolver.is_available:
+        try:
+            sp_mat = resolver.compute_spatial_features(crm_pre, candidates)
+            matrix[:, _IDX_SPATIAL] = sp_mat
+        except Exception as e:
+            logger.debug("Failed computing batch spatial features: %s", e)
+
     blocks = {
         "V_text": matrix[:, _IDX_TEXT],
         "V_geo": matrix[:, _IDX_GEO],
+        "V_spatial": matrix[:, _IDX_SPATIAL],
         "V_admin": matrix[:, _IDX_ADMIN],
         "V_interact": matrix[:, _IDX_INTERACT],
     }

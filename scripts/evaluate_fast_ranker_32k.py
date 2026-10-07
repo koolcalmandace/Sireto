@@ -148,6 +148,7 @@ def evaluate(
         rescue_sidecar=True,
     )
     tfidf_cache: OrderedDict = OrderedDict()
+    persistent_cache = TfidfPersistentCache(Path("data/tfidf_cache"))
     fast_indices = [FEATURE_NAMES.index(name) for name in FAST_RANKER_FEATURE_NAMES]
 
     # Checkpoint management
@@ -319,6 +320,7 @@ def evaluate(
                 crm_pre=crm_pre,
                 config=config,
                 tfidf_cache=tfidf_cache,
+                persistent_cache=persistent_cache,
                 gt_siret=gt_siret,
                 compute_idf_map=True,
             )

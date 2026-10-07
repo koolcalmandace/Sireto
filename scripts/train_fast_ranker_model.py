@@ -47,6 +47,7 @@ from src.xgb_matcher.memory_governor import MemoryGovernor
 from src.xgb_matcher.partitioned_store import PartitionedCandidateStore
 from src.xgb_matcher.retrieval import build_candidate_pool
 from src.xgb_matcher.retrieval_config import RetrievalConfigV1
+from src.xgb_matcher.tfidf_cache import TfidfPersistentCache
 
 MODELS_DIR = PROJECT_ROOT / "models"
 MODEL_PATH = MODELS_DIR / "xgbranker_fast_v8.json"
@@ -72,8 +73,19 @@ def train_fast_ranker(
     df_valid = df_crm[df_crm["gt_siret"].notna() & (df_crm["gt_siret"].str.strip().str.len() == 14)].copy()
     df_valid["siren"] = df_valid["gt_siret"].str.strip().str[:9]
 
-    sample_df = df_valid.sample(n=min(sample_size, len(df_valid)), random_state=random_seed).copy()
-    sample_df = sample_df.reset_index(drop=True)
+    # Échantillonnage clusterisé par commune pour maximiser le hit-rate Parquet et TF-IDF
+    communes = [c for c in df_valid["crm_insee"].dropna().unique() if c.strip()]
+    rng = np.random.RandomState(random_seed)
+    shuffled_communes = rng.permutation(communes)
+
+    selected_indices = []
+    for comm in shuffled_communes:
+        c_idxs = df_valid.index[df_valid["crm_insee"] == comm].tolist()
+        selected_indices.extend(c_idxs)
+        if len(selected_indices) >= sample_size:
+            break
+
+    sample_df = df_valid.loc[selected_indices[:sample_size]].copy().reset_index(drop=True)
 
     gkf = GroupKFold(n_splits=3)
     train_idx, dev_idx = next(gkf.split(sample_df, groups=sample_df["siren"]))
@@ -87,6 +99,7 @@ def train_fast_ranker(
     store = PartitionedCandidateStore(partitions_dir, max_cache_size=40)
     config = RetrievalConfigV1(prefilter_k=500, rescue_sidecar=True)
     tfidf_cache: OrderedDict = OrderedDict()
+    persistent_cache = TfidfPersistentCache(PROJECT_ROOT / "data" / "tfidf_cache")
     memory_gov = MemoryGovernor(target_max_gb=3.0, critical_max_gb=3.8, check_interval=10)
 
     fast_indices = [FEATURE_NAMES.index(name) for name in FAST_RANKER_FEATURE_NAMES]
@@ -121,6 +134,7 @@ def train_fast_ranker(
                 crm_pre=crm_pre,
                 config=config,
                 tfidf_cache=tfidf_cache,
+                persistent_cache=persistent_cache,
                 gt_siret=gt_siret,
                 compute_idf_map=True,
             )
@@ -222,4 +236,16 @@ def train_fast_ranker(
 
 
 if __name__ == "__main__":
-    train_fast_ranker()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Train Fast Ranker V8 Model")
+    parser.add_argument("--sample-size", type=int, default=3000, help="Number of queries for training/dev")
+    parser.add_argument("--rounds", type=int, default=80, help="Number of boosting rounds")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    args = parser.parse_args()
+
+    train_fast_ranker(
+        sample_size=args.sample_size,
+        num_boost_round=args.rounds,
+        random_seed=args.seed,
+    )

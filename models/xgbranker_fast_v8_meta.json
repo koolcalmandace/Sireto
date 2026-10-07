@@ -38,9 +38,13 @@
     "addr_unsupported_by_name",
     "name_jaro_vs_enseigne",
     "sidecar_match",
-    "is_active"
+    "is_active",
+    "spatial_distance_km",
+    "spatial_is_very_close",
+    "spatial_is_same_block",
+    "spatial_has_coords"
   ],
-  "num_features": 38,
+  "num_features": 42,
   "params": {
     "objective": "rank:pairwise",
     "tree_method": "hist",
@@ -53,7 +57,7 @@
       "ndcg@50"
     ]
   },
-  "train_queries": 1917,
-  "dev_queries": 965,
-  "num_boost_round": 80
+  "train_queries": 316,
+  "dev_queries": 164,
+  "num_boost_round": 50
 }
