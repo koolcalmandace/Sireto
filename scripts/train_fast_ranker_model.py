@@ -36,6 +36,7 @@ import xgboost as xgb
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.xgb_matcher.checkpoint import TrainingFeatureCheckpointManager
 from src.xgb_matcher.features import (
     FAST_RANKER_FEATURE_NAMES,
     FEATURE_NAMES,
@@ -60,12 +61,17 @@ def train_fast_ranker(
     sample_size: int = 3000,
     random_seed: int = 42,
     num_boost_round: int = 80,
+    resume: bool = True,
+    chunk_size: int = 500,
+    checkpoint_dir: Optional[Path] = None,
+    output_model_path: Optional[Path] = None,
 ) -> xgb.Booster:
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     print("=" * 80)
     print("ENTRAÎNEMENT DU FAST RANKER V8 (STAGE 1)")
     print(f"Features ({len(FAST_RANKER_FEATURE_NAMES)}) : {FAST_RANKER_FEATURE_NAMES}")
     print(f"Échantillon d'entraînement : {sample_size} requêtes (seed={random_seed})")
+    print(f"Atomic Checkpointing : {'Actif (chunk=' + str(chunk_size) + ')' if resume else 'Désactivé'}")
     print("=" * 80)
 
     # 1. Chargement & découpage GroupKFold par SIREN
@@ -95,7 +101,40 @@ def train_fast_ranker(
     # Tri géographique pour cache Parquet optimal
     sample_df = sample_df.sort_values(["crm_insee", "crm_cp"]).reset_index(drop=True)
 
-    # 2. Extraction des pools et features
+    # 2. Extraction des pools et features avec Checkpointing Atomique
+    if checkpoint_dir is None:
+        checkpoint_dir = PROJECT_ROOT / "data" / "train_checkpoints" / f"fast_ranker_{sample_size}_seed{random_seed}"
+
+    ckpt_mgr = TrainingFeatureCheckpointManager(
+        tag=f"fast_ranker_{sample_size}_seed{random_seed}",
+        checkpoint_dir=checkpoint_dir,
+        sample_size=sample_size,
+        random_seed=random_seed,
+        feature_names=FAST_RANKER_FEATURE_NAMES,
+        chunk_size=chunk_size,
+    )
+
+    total = len(sample_df)
+    start_idx = 0
+    if resume and ckpt_mgr.can_resume():
+        (
+            last_idx,
+            train_X_list,
+            train_y_list,
+            train_groups,
+            dev_X_list,
+            dev_y_list,
+            dev_groups,
+        ) = ckpt_mgr.load_checkpoint()
+        start_idx = last_idx + 1
+        print(f"\n[REPRISE ATOMIQUE] Checkpoint détecté dans {checkpoint_dir}")
+        print(f"  Reprise immédiate à l'index {start_idx}/{total} (Train={len(train_groups)}, Dev={len(dev_groups)})\n")
+    else:
+        if not resume:
+            ckpt_mgr.clear()
+        train_X_list, train_y_list, train_groups = [], [], []
+        dev_X_list, dev_y_list, dev_groups = [], [], []
+
     store = PartitionedCandidateStore(partitions_dir, max_cache_size=40)
     config = RetrievalConfigV1(prefilter_k=500, rescue_sidecar=True)
     tfidf_cache: OrderedDict = OrderedDict()
@@ -104,14 +143,10 @@ def train_fast_ranker(
 
     fast_indices = [FEATURE_NAMES.index(name) for name in FAST_RANKER_FEATURE_NAMES]
 
-    train_X_list, train_y_list, train_groups = [], [], []
-    dev_X_list, dev_y_list, dev_groups = [], [], []
-
     t0 = time.perf_counter()
-    total = len(sample_df)
     print("\nExtraction des features pour l'apprentissage...")
 
-    for idx in range(total):
+    for idx in range(start_idx, total):
         row = sample_df.iloc[idx]
         gt_siret = str(row["gt_siret"]).strip().zfill(14)
         cp = str(row.get("crm_cp") or "").strip().zfill(5)
@@ -172,17 +207,26 @@ def train_fast_ranker(
             dev_y_list.append(y)
             dev_groups.append(len(cand_list))
 
+        ckpt_mgr.add_sample(
+            idx=idx,
+            split=split,
+            feat_matrix=feat_matrix,
+            y=y,
+            group_size=len(cand_list),
+        )
+
         if len(tfidf_cache) > 40:
             tfidf_cache.popitem(last=False)
         memory_gov.check_and_release(store=store, tfidf_cache=tfidf_cache)
 
-        if (idx + 1) % 500 == 0 or (idx + 1) == total:
+        if (idx + 1) % 250 == 0 or (idx + 1) == total:
             elapsed = time.perf_counter() - t0
-            rate = (idx + 1) / max(elapsed, 0.001)
-            print(f"  Extraction : {idx + 1}/{total} ({rate:.1f} req/s) [RAM: {memory_gov.get_rss_gb():.2f} Go]")
+            rate = (idx + 1 - start_idx) / max(elapsed, 0.001)
+            print(f"  Extraction : {idx + 1}/{total} ({rate:.1f} req/s) [RAM: {memory_gov.get_rss_gb():.2f} Go]", flush=True)
 
-    print(f"Extraction terminée en {time.perf_counter() - t0:.1f}s.")
-    print(f"  Train: {len(train_groups)} requêtes, Dev: {len(dev_groups)} requêtes.")
+    ckpt_mgr.finalize(last_idx=total - 1)
+    print(f"Extraction terminée en {time.perf_counter() - t0:.1f}s.", flush=True)
+    print(f"  Train: {len(train_groups)} requêtes, Dev: {len(dev_groups)} requêtes.", flush=True)
 
     # 3. Entraînement XGBoost Pairwise
     print("\nEntraînement XGBoost Ranker...")
@@ -215,11 +259,23 @@ def train_fast_ranker(
     )
 
     # 4. Sauvegarde
-    booster.save_model(str(MODEL_PATH))
-    with open(META_PATH, "w", encoding="utf-8") as f:
+    target_model_path = output_model_path or MODEL_PATH
+    target_meta_path = target_model_path.with_name(target_model_path.stem + "_meta.json")
+
+    # Backup existing model if present
+    if target_model_path.exists():
+        bak_path = target_model_path.with_name(target_model_path.stem + ".bak.json")
+        try:
+            import shutil
+            shutil.copy2(target_model_path, bak_path)
+        except Exception:
+            pass
+
+    booster.save_model(str(target_model_path))
+    with open(target_meta_path, "w", encoding="utf-8") as f:
         json.dump(
             {
-                "model_name": "xgbranker_fast_v8.json",
+                "model_name": target_model_path.name,
                 "feature_names": FAST_RANKER_FEATURE_NAMES,
                 "num_features": len(FAST_RANKER_FEATURE_NAMES),
                 "params": params,
@@ -231,7 +287,7 @@ def train_fast_ranker(
             indent=2,
         )
 
-    print(f"\n[SUCCÈS] Modèle Fast Ranker V8 sauvegardé dans : {MODEL_PATH}")
+    print(f"\n[SUCCÈS] Modèle Fast Ranker V8 sauvegardé dans : {target_model_path}")
     return booster
 
 
@@ -242,10 +298,16 @@ if __name__ == "__main__":
     parser.add_argument("--sample-size", type=int, default=3000, help="Number of queries for training/dev")
     parser.add_argument("--rounds", type=int, default=80, help="Number of boosting rounds")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--no-resume", action="store_true", default=False, help="Disable auto-resume and start fresh")
+    parser.add_argument("--chunk-size", type=int, default=500, help="Number of queries per atomic chunk")
+    parser.add_argument("--output-model", type=str, default=None, help="Custom output model path")
     args = parser.parse_args()
 
     train_fast_ranker(
         sample_size=args.sample_size,
         num_boost_round=args.rounds,
         random_seed=args.seed,
+        resume=not args.no_resume,
+        chunk_size=args.chunk_size,
+        output_model_path=Path(args.output_model) if args.output_model else None,
     )

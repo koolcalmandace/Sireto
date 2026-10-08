@@ -20,7 +20,9 @@ import time
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+import numpy as np
 
 logger = logging.getLogger("xgb_matcher.checkpoint")
 
@@ -415,3 +417,268 @@ class CheckpointManager:
             except Exception:
                 pass
             self._details_file_handle = None
+
+
+class TrainingFeatureCheckpointManager:
+    """Manages atomic chunk-based feature persistence and resume capabilities
+
+    for model training jobs (e.g. Fast Ranker, Decider).
+    """
+
+    def __init__(
+        self,
+        tag: str,
+        checkpoint_dir: Path,
+        sample_size: int,
+        random_seed: int,
+        feature_names: List[str],
+        chunk_size: int = 500,
+    ) -> None:
+        self.tag = tag
+        self.checkpoint_dir = Path(checkpoint_dir)
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.sample_size = sample_size
+        self.random_seed = random_seed
+        self.feature_names = list(feature_names)
+        self.chunk_size = max(1, chunk_size)
+
+        self.manifest_path = self.checkpoint_dir / "manifest.json"
+        self.manifest_tmp = self.checkpoint_dir / "manifest.json.tmp"
+
+        # In-memory chunk buffer
+        self._buffer_train_X: List[np.ndarray] = []
+        self._buffer_train_y: List[np.ndarray] = []
+        self._buffer_train_groups: List[int] = []
+
+        self._buffer_dev_X: List[np.ndarray] = []
+        self._buffer_dev_y: List[np.ndarray] = []
+        self._buffer_dev_groups: List[int] = []
+
+        self._chunk_start_idx: int = 0
+        self._last_processed_idx: int = -1
+        self._chunks_recorded: List[str] = []
+        self._completed: bool = False
+
+    def can_resume(self) -> bool:
+        """Check if an existing checkpoint matches the current training configuration."""
+        if not self.manifest_path.exists():
+            return False
+        try:
+            with open(self.manifest_path, "r", encoding="utf-8") as f:
+                manifest = json.load(f)
+            if manifest.get("sample_size") != self.sample_size:
+                logger.info(
+                    "Checkpoint mismatch on sample_size (%s vs %s)",
+                    manifest.get("sample_size"),
+                    self.sample_size,
+                )
+                return False
+            if manifest.get("random_seed") != self.random_seed:
+                logger.info(
+                    "Checkpoint mismatch on random_seed (%s vs %s)",
+                    manifest.get("random_seed"),
+                    self.random_seed,
+                )
+                return False
+            if manifest.get("feature_names") != self.feature_names:
+                logger.info("Checkpoint mismatch on feature_names")
+                return False
+            if not manifest.get("chunks"):
+                return False
+            for c_name in manifest["chunks"]:
+                if not (self.checkpoint_dir / c_name).exists():
+                    logger.warning("Missing chunk file %s, cannot resume safely", c_name)
+                    return False
+            return True
+        except Exception as e:
+            logger.warning("Error reading manifest %s: %s", self.manifest_path, e)
+            return False
+
+    def load_checkpoint(
+        self,
+    ) -> Tuple[
+        int,
+        List[np.ndarray],
+        List[np.ndarray],
+        List[int],
+        List[np.ndarray],
+        List[np.ndarray],
+        List[int],
+    ]:
+        """Load all committed chunks from disk to resume training."""
+        with open(self.manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+
+        self._last_processed_idx = manifest.get("last_processed_idx", -1)
+        self._chunks_recorded = list(manifest.get("chunks", []))
+        self._completed = manifest.get("completed", False)
+        self._chunk_start_idx = self._last_processed_idx + 1
+
+        train_X_list: List[np.ndarray] = []
+        train_y_list: List[np.ndarray] = []
+        train_groups: List[int] = []
+
+        dev_X_list: List[np.ndarray] = []
+        dev_y_list: List[np.ndarray] = []
+        dev_groups: List[int] = []
+
+        for c_name in self._chunks_recorded:
+            c_path = self.checkpoint_dir / c_name
+            with np.load(c_path) as data:
+                t_x = data["train_X"]
+                t_y = data["train_y"]
+                t_g = data["train_groups"].tolist()
+                d_x = data["dev_X"]
+                d_y = data["dev_y"]
+                d_g = data["dev_groups"].tolist()
+
+                if len(t_g) > 0:
+                    train_X_list.append(t_x)
+                    train_y_list.append(t_y)
+                    train_groups.extend(t_g)
+
+                if len(d_g) > 0:
+                    dev_X_list.append(d_x)
+                    dev_y_list.append(d_y)
+                    dev_groups.extend(d_g)
+
+        logger.info(
+            "Resumed training checkpoint from %s: last_idx=%d, train_queries=%d, dev_queries=%d",
+            self.checkpoint_dir,
+            self._last_processed_idx,
+            len(train_groups),
+            len(dev_groups),
+        )
+        return (
+            self._last_processed_idx,
+            train_X_list,
+            train_y_list,
+            train_groups,
+            dev_X_list,
+            dev_y_list,
+            dev_groups,
+        )
+
+    def add_sample(
+        self,
+        idx: int,
+        split: str,
+        feat_matrix: np.ndarray,
+        y: np.ndarray,
+        group_size: int,
+    ) -> None:
+        """Add a processed sample to the chunk buffer."""
+        if split == "train":
+            self._buffer_train_X.append(feat_matrix)
+            self._buffer_train_y.append(y)
+            self._buffer_train_groups.append(group_size)
+        else:
+            self._buffer_dev_X.append(feat_matrix)
+            self._buffer_dev_y.append(y)
+            self._buffer_dev_groups.append(group_size)
+
+        total_in_buffer = len(self._buffer_train_groups) + len(self._buffer_dev_groups)
+        if total_in_buffer >= self.chunk_size:
+            self.flush_chunk(last_idx=idx)
+
+    def flush_chunk(self, last_idx: int) -> Optional[str]:
+        """Atomically persist currently buffered samples into a compressed .npz chunk file."""
+        if not self._buffer_train_groups and not self._buffer_dev_groups:
+            self._last_processed_idx = last_idx
+            self._write_manifest(last_idx=last_idx, completed=False)
+            self._chunk_start_idx = last_idx + 1
+            return None
+
+        chunk_name = f"chunk_{self._chunk_start_idx:05d}_{last_idx:05d}.npz"
+        chunk_path = self.checkpoint_dir / chunk_name
+        tmp_chunk_path = self.checkpoint_dir / f"{chunk_name}.tmp"
+
+        num_feats = len(self.feature_names)
+        t_x = (
+            np.vstack(self._buffer_train_X)
+            if self._buffer_train_X
+            else np.empty((0, num_feats), dtype=np.float32)
+        )
+        t_y = (
+            np.concatenate(self._buffer_train_y)
+            if self._buffer_train_y
+            else np.empty((0,), dtype=np.float32)
+        )
+        t_g = np.array(self._buffer_train_groups, dtype=np.int32)
+
+        d_x = (
+            np.vstack(self._buffer_dev_X)
+            if self._buffer_dev_X
+            else np.empty((0, num_feats), dtype=np.float32)
+        )
+        d_y = (
+            np.concatenate(self._buffer_dev_y)
+            if self._buffer_dev_y
+            else np.empty((0,), dtype=np.float32)
+        )
+        d_g = np.array(self._buffer_dev_groups, dtype=np.int32)
+
+        with open(tmp_chunk_path, "wb") as f:
+            np.savez_compressed(
+                f,
+                train_X=t_x,
+                train_y=t_y,
+                train_groups=t_g,
+                dev_X=d_x,
+                dev_y=d_y,
+                dev_groups=d_g,
+            )
+        tmp_chunk_path.replace(chunk_path)
+
+        self._chunks_recorded.append(chunk_name)
+        self._last_processed_idx = last_idx
+        self._write_manifest(last_idx=last_idx, completed=False)
+
+        self._buffer_train_X.clear()
+        self._buffer_train_y.clear()
+        self._buffer_train_groups.clear()
+        self._buffer_dev_X.clear()
+        self._buffer_dev_y.clear()
+        self._buffer_dev_groups.clear()
+        self._chunk_start_idx = last_idx + 1
+        return chunk_name
+
+    def finalize(self, last_idx: int) -> None:
+        """Flush remaining buffered samples and mark checkpoint as completed."""
+        if self._buffer_train_groups or self._buffer_dev_groups:
+            self.flush_chunk(last_idx)
+        self._last_processed_idx = last_idx
+        self._completed = True
+        self._write_manifest(last_idx=last_idx, completed=True)
+
+    def clear(self) -> None:
+        """Clear all chunks and manifest for a fresh run."""
+        if self.checkpoint_dir.exists():
+            for f in self.checkpoint_dir.glob("chunk_*.npz*"):
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+            for f in [self.manifest_path, self.manifest_tmp]:
+                if f.exists():
+                    try:
+                        f.unlink()
+                    except Exception:
+                        pass
+
+    def _write_manifest(self, last_idx: int, completed: bool) -> None:
+        manifest_data = {
+            "tag": self.tag,
+            "sample_size": self.sample_size,
+            "random_seed": self.random_seed,
+            "feature_names": self.feature_names,
+            "num_features": len(self.feature_names),
+            "last_processed_idx": last_idx,
+            "chunks": self._chunks_recorded,
+            "completed": completed,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        with open(self.manifest_tmp, "w", encoding="utf-8") as f:
+            json.dump(manifest_data, f, indent=2)
+        self.manifest_tmp.replace(self.manifest_path)
+
