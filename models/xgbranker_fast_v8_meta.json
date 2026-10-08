@@ -57,7 +57,7 @@
       "ndcg@50"
     ]
   },
-  "train_queries": 316,
-  "dev_queries": 164,
-  "num_boost_round": 50
+  "train_queries": 6398,
+  "dev_queries": 3187,
+  "num_boost_round": 80
 }
