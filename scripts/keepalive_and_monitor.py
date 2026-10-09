@@ -139,7 +139,11 @@ def get_system_ram():
 
 def main():
     target_pid = int(sys.argv[1]) if len(sys.argv) > 1 else 19952
+    project_root = Path(__file__).resolve().parent.parent
+    target_file = Path(sys.argv[2]) if len(sys.argv) > 2 else (project_root / "reports" / "fast_ranker_32k" / "fast_ranker_32k_v8_unified_ban_summary.json")
+
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Démarrage Sentinelle KeepAlive pour PID {target_pid}", flush=True)
+    print(f"  Fichier cible attendu : {target_file}", flush=True)
     
     # Disable standby timeouts temporarily while running
     subprocess.run(["powercfg", "/change", "standby-timeout-ac", "0"], check=False)
@@ -147,21 +151,18 @@ def main():
     set_keepalive()
     print("[SUCCÈS] Mode anti-veille activé (powercfg timeout=0 + SetThreadExecutionState).", flush=True)
 
-    project_root = Path(__file__).resolve().parent.parent
-    target_model = project_root / "models" / "xgbranker_fast_v8.json"
-
-    TOTAL_EST_CPU = 19800.0
+    ckpt_file = project_root / "reports" / "fast_ranker_32k" / ".checkpoints" / "checkpoint_32k_v8_unified_ban.json"
     last_keepalive_refresh = time.time()
 
     try:
         while True:
             stats = get_process_stats(target_pid)
             if stats is None or not stats["alive"]:
-                print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Entraînement terminé : PID {target_pid} n'est plus actif.", flush=True)
-                if target_model.exists():
-                    print(f"[SUCCÈS MAJEUR] Modèle sauvegardé avec succès : {target_model} ({target_model.stat().st_size} octets) !", flush=True)
+                print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Processus PID {target_pid} terminé.", flush=True)
+                if target_file.exists():
+                    print(f"[SUCCÈS MAJEUR] Rapport cible sauvegardé : {target_file} ({target_file.stat().st_size} octets) !", flush=True)
                 else:
-                    print(f"[ATTENTION] Modèle {target_model} non trouvé. Vérifiez les logs.", flush=True)
+                    print(f"[INFO] Processus achevé. Vérifiez les logs : logs/run_fast_ranker_32k_unified_ban.log", flush=True)
                 break
 
             if time.time() - last_keepalive_refresh > 120:
@@ -171,17 +172,25 @@ def main():
             sys_ram = get_system_ram()
             cpu_s = stats["cpu_seconds"]
             rss = stats["rss_mb"]
-            est_pct = min(99.0, (cpu_s / TOTAL_EST_CPU) * 100.0)
 
-            rem_cpu = max(0.0, TOTAL_EST_CPU - cpu_s)
-            eta_time = datetime.now() + timedelta(seconds=rem_cpu)
+            # Try to read real progress from checkpoint JSON if available
+            prog_str = ""
+            if ckpt_file.exists():
+                try:
+                    with open(ckpt_file, "r", encoding="utf-8") as f:
+                        c_data = json.load(f)
+                    total_q = c_data.get("total_queries", 0)
+                    total_r = c_data.get("total_rows", 32570)
+                    if total_r > 0:
+                        pct = (total_q / total_r) * 100.0
+                        prog_str = f" | Progrès={total_q}/{total_r} ({pct:.1f}%)"
+                except Exception:
+                    pass
 
             print(
                 f"[{datetime.now().strftime('%H:%M:%S')}] "
                 f"PID {target_pid}: CPU={cpu_s/3600:.2f}h ({cpu_s:.0f}s) | "
-                f"RAM={rss:.0f}Mo | "
-                f"Progression est.~{est_pct:.1f}% | "
-                f"ETA~{eta_time.strftime('%H:%M')} | "
+                f"RAM={rss:.0f}Mo{prog_str} | "
                 f"RAM Libre Sys={sys_ram['free_gb']:.2f}Go ({sys_ram['load_pct']}%)",
                 flush=True
             )

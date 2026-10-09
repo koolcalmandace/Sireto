@@ -521,6 +521,7 @@ def main():
     parser.add_argument("--fresh", action="store_true", default=False)
     parser.add_argument("--max-rows", type=int, default=None, help="Limite le nombre de requêtes à évaluer")
     parser.add_argument("--log-file", type=Path, default=Path("logs/fast_ranker_32k.log"))
+    parser.add_argument("--no-pause-on-lock", action="store_true", default=False, help="Ne pas mettre en pause sur verrouillage de session")
     args = parser.parse_args()
 
     rows = load_crm_gt(args.crm)
@@ -540,6 +541,8 @@ def main():
         resume=args.resume and not args.fresh,
         fresh=args.fresh,
         log_file=args.log_file,
+        pause_on_lock=not args.no_pause_on_lock,
+        idle_timeout_seconds=999999999.0 if args.no_pause_on_lock else 300.0,
     )
 
 
