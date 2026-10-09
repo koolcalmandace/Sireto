@@ -9,6 +9,7 @@ original settings (5 min on AC, 3 min on DC) when training is done.
 
 import atexit
 import ctypes
+import json
 import os
 import signal
 import subprocess
@@ -173,9 +174,19 @@ def main():
             cpu_s = stats["cpu_seconds"]
             rss = stats["rss_mb"]
 
-            # Try to read real progress from checkpoint JSON if available
+            # Try to read real progress from details CSV or checkpoint JSON
             prog_str = ""
-            if ckpt_file.exists():
+            details_file = project_root / "reports" / "fast_ranker_32k" / "fast_ranker_32k_v8_unified_ban_details.csv"
+            if details_file.exists():
+                try:
+                    with open(details_file, "r", encoding="utf-8", errors="replace") as f:
+                        lines_cnt = max(0, sum(1 for _ in f) - 1)
+                    if lines_cnt > 0:
+                        pct = (lines_cnt / 32570.0) * 100.0
+                        prog_str = f" | Progrès={lines_cnt}/32570 ({pct:.1f}%)"
+                except Exception:
+                    pass
+            elif ckpt_file.exists():
                 try:
                     with open(ckpt_file, "r", encoding="utf-8") as f:
                         c_data = json.load(f)
