@@ -148,7 +148,7 @@ def evaluate(
         rescue_sidecar=True,
     )
     tfidf_cache: OrderedDict = OrderedDict()
-    persistent_cache = TfidfPersistentCache(Path("data/tfidf_cache"))
+    persistent_cache = None  # In-memory RAM LRU only; avoids disk saturation on national scale
     fast_indices = [FEATURE_NAMES.index(name) for name in FAST_RANKER_FEATURE_NAMES]
 
     # Checkpoint management
