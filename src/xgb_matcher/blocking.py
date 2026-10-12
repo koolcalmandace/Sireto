@@ -26,6 +26,7 @@ STREET_STOPWORDS: Set[str] = {
     "RUE", "AV", "AVE", "AVENUE", "BD", "BOULEVARD", "CHE", "CHEMIN",
     "IMP", "IMPASSE", "ALL", "ALLEE", "PL", "PLACE", "SQ", "SQUARE",
     "ROUTE", "RTE", "QUAI", "SENTIER", "ZA", "ZI", "ZAC",
+    "COURS", "CRS", "PASSAGE", "PAS", "PROMENADE", "PROM", "VOIE", "RESIDENCE", "RES",
 }
 
 # Generic corporate and legal stopwords to prevent candidate eviction in large metropolises

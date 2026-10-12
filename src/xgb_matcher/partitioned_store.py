@@ -255,6 +255,12 @@ class PartitionedCandidateStore:
                     if mega_insee_policy == "full_insee":
                         return self.load_by_insee(code_insee)
             rows = self.load_by_insee(code_insee)
+            # Partition fallback: if INSEE partition is corrupt/truncated (<= 2 rows)
+            # but CP partition contains candidates with this exact INSEE code, use them.
+            if len(rows) <= 2 and code_cp:
+                cp_filtered = self.load_by_postcode_filtered_insee(code_cp, code_insee)
+                if len(cp_filtered) > len(rows):
+                    rows = cp_filtered
             if rows:
                 return rows
         if code_cp:

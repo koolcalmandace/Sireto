@@ -829,6 +829,7 @@ def preprocess_crm_row(crm_row: Mapping[str, Any]) -> Dict[str, Any]:
         "crm_city": crm_city,
         "crm_city_norm": normalize_text(crm_city),
         "crm_street_num": extract_street_number(crm_address_raw),
+        "crm_street_name": extract_street_name_from_address(crm_address_raw),
         "postcode": crm_row.get("postcode") or crm_row.get("crm_cp"),
         "insee": crm_row.get("insee") or crm_row.get("crm_insee"),
         "crm_insee": crm_row.get("crm_insee") or crm_row.get("insee"),
