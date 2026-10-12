@@ -55,7 +55,6 @@ class RetentionGuardConfig:
 
     # Guard 1: Signal-Gated Intra-SIREN Compaction
     intra_siren_trigger_count: int = 3
-    intra_siren_min_rank_eviction: int = 15  # Candidates in top-15 raw are immune from clone eviction
     signal_street_name_jaro_min: float = 0.75
     signal_addr_jaro_min: float = 0.80
     signal_enseigne_jaro_min: float = 0.70
@@ -249,9 +248,6 @@ def apply_retention_topk(
     for siren, slot_list in siren_members_in_topk.items():
         passive_clone_slots: List[int] = []
         for slot in slot_list:
-            if slot < cfg.intra_siren_min_rank_eviction:
-                # Top-ranked candidates are immune from passive clone eviction
-                continue
             c_idx = selected_indices[slot]
             cand = candidates[c_idx]
 
@@ -261,22 +257,39 @@ def apply_retention_topk(
             street_num_m = _get_val(c_idx, "street_number_match", "street_number_match", 0.0)
             addr_jaro = _get_val(c_idx, "addr_jaro", "addr_jaro", 0.0)
             enseigne_jaro = _get_val(c_idx, "name_jaro_vs_enseigne", "name_jaro_vs_enseigne", 0.0)
+            etab_sim = _get_val(c_idx, "name_sim_max_etab", "name_sim_max_etab", 0.0)
+            name_jaro = _get_val(c_idx, "name_jaro_max", "name_jaro_max", 0.0)
+            tok_overlap = _get_val(c_idx, "name_token_overlap_max", "name_token_overlap_max", 0.0)
 
-            # Signal Check: Siège, Sidecar, Street, House Number, Address, or Enseigne
+            # Signal 1: Nom d'usage / Enseigne propre à l'établissement (discrimination nominale)
+            has_etab_name_signal = (enseigne_jaro >= cfg.signal_enseigne_jaro_min) or (etab_sim >= 0.70)
+
+            # Signal 2: Signal d'adresse (si CRM fournit une adresse)
+            has_addr_signal = False
+            if crm_has_street:
+                has_addr_signal = (
+                    (street_jaro >= cfg.signal_street_name_jaro_min)
+                    or (street_num_m >= 1.0)
+                    or (addr_jaro >= cfg.signal_addr_jaro_min)
+                )
+
+            # Signal 3: Signal nominal de l'entité
+            has_name_signal = False
+            if not crm_has_street:
+                has_name_signal = (name_jaro >= 0.70) or (tok_overlap > 0.0)
+            else:
+                # Si CRM a une adresse mais le candidat en SIRENE n'a pas de voie discriminante (street_jaro == 0.0)
+                # et a une forte similarité nominale (>= 0.85), il s'agit de la même entité sans voie déclarée
+                if (name_jaro >= 0.85) and (street_jaro == 0.0):
+                    has_name_signal = True
+
             has_positive_signal = (
                 is_siege
                 or is_sidecar
-                or (crm_has_street and street_jaro >= cfg.signal_street_name_jaro_min)
-                or (crm_has_street and street_num_m >= 1.0)
-                or (crm_has_street and addr_jaro >= cfg.signal_addr_jaro_min)
-                or (enseigne_jaro >= cfg.signal_enseigne_jaro_min)
+                or has_etab_name_signal
+                or has_addr_signal
+                or has_name_signal
             )
-
-            # If CRM has no street, do not penalize candidates with strong name similarity
-            if not crm_has_street:
-                name_jaro = _get_val(c_idx, "name_jaro_max", "name_jaro_max", 0.0)
-                if name_jaro >= 0.70 or enseigne_jaro >= cfg.signal_enseigne_jaro_min:
-                    has_positive_signal = True
 
             if not has_positive_signal:
                 passive_clone_slots.append(slot)
@@ -307,7 +320,7 @@ def apply_retention_topk(
             eviction_priority_slots.append(slot)
 
     # 2C. Fallback: Bottom slots of top-k without sidecar or strong name protection
-    for slot in range(cfg.top_k - 1, max(cfg.intra_siren_min_rank_eviction, 0), -1):
+    for slot in range(cfg.top_k - 1, -1, -1):
         if slot in eviction_priority_slots:
             continue
         c_idx = selected_indices[slot]

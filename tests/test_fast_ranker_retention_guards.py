@@ -109,7 +109,7 @@ def test_guard1_signal_gated_intra_siren_compaction():
     }
     idf_map = {"CHANCEL": 8.5, "DISTRIBUTION": 2.1}
 
-    cfg = RetentionGuardConfig(top_k=50, intra_siren_min_rank_eviction=0)
+    cfg = RetentionGuardConfig(top_k=50)
     retained_indices, retained_sirets = apply_retention_topk(
         candidates=candidates,
         scores=scores,
