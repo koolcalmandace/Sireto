@@ -458,6 +458,7 @@ def build_candidate_pool(
     # === V7: Standard geo-partitioned retrieval (default) ===
     # Step 1: Load base candidates (strict geo resolution: INSEE -> CP child discovery -> empty)
     crm_id = str(crm_row.get("crm_id") or crm_row.get("ID") or crm_row.get("id") or "<unknown>")
+    crm_street = (crm_pre.get("crm_street_name") if crm_pre else None) or crm_row.get("crm_address") or ""
     if timer:
         with timer.stage("partition_load"):
             base_candidates = store.load_with_geo_resolution(
@@ -466,6 +467,7 @@ def build_candidate_pool(
                 crm_id=crm_id,
                 mega_insee_max_rows=config.mega_insee_max_rows,
                 mega_insee_policy=config.mega_insee_policy,
+                street_name=crm_street,
                 logger=_logger,
             )
     else:
@@ -475,6 +477,7 @@ def build_candidate_pool(
             crm_id=crm_id,
             mega_insee_max_rows=config.mega_insee_max_rows,
             mega_insee_policy=config.mega_insee_policy,
+            street_name=crm_street,
             logger=_logger,
         )
 

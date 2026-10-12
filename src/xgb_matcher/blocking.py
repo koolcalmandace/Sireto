@@ -287,7 +287,8 @@ def build_address_tfidf_index(
 ) -> Tuple[Optional[TfidfVectorizer], Optional[Any]]:
     """Build TF-IDF index for candidate addresses (Address First Retrieval)."""
     try:
-        addresses = [normalize_text_for_tfidf(build_address(c) or "") for c in candidates]
+        from .features import build_address_for_retrieval
+        addresses = [normalize_text_for_tfidf(build_address_for_retrieval(c) or "") for c in candidates]
         
         # Check if we have any addresses
         if not any(addresses):

@@ -366,6 +366,41 @@ def build_address(cand: dict) -> str:
     return addr_norm
 
 
+CLEAN_COMPLEMENT_REGEX = re.compile(
+    r"\b(BP\s*\d+|CEDEX\s*\d*|ETAGE\s*\d+|CS\s*\d+|BOITE\s*\d+)\b",
+    re.IGNORECASE,
+)
+
+
+def build_address_for_retrieval(cand: dict) -> str:
+    """
+    Build address string for candidate retrieval (TF-IDF), incorporating
+    cleaned complementAdresse to capture business parks, industrial zones,
+    and lieux-dits without corrupting street-level matching.
+    """
+    if isinstance(cand, dict):
+        cached = cand.get("_xgb_cached_addr_retrieval")
+        if isinstance(cached, str):
+            return cached
+
+    parts = [
+        cand.get("numeroVoie"),
+        cand.get("typeVoie"),
+        cand.get("libelleVoie"),
+    ]
+    voie = " ".join(str(x) for x in parts if x and str(x).strip())
+    comp = str(cand.get("complementAdresse") or "").strip()
+    if comp:
+        comp_clean = CLEAN_COMPLEMENT_REGEX.sub(" ", comp)
+        comp_clean = re.sub(r"\s+", " ", comp_clean).strip()
+        if comp_clean:
+            voie = f"{voie} {comp_clean}".strip() if voie else comp_clean
+    addr_norm = normalize_text(voie)
+    if isinstance(cand, dict):
+        cand["_xgb_cached_addr_retrieval"] = addr_norm
+    return addr_norm
+
+
 # --------------------------------------------------------------------------- #
 # Street type normalization (BAN official nomenclature)
 # --------------------------------------------------------------------------- #

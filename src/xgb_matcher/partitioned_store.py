@@ -243,6 +243,7 @@ class PartitionedCandidateStore:
         *,
         mega_insee_max_rows: int = 100_000,
         mega_insee_policy: str = "cp_filter_insee",
+        street_name: str = "",
     ) -> List[dict]:
         code_insee = normalize_code(insee)
         code_cp = normalize_code(postcode)
@@ -264,7 +265,24 @@ class PartitionedCandidateStore:
             if rows:
                 return rows
         if code_cp:
-            return self.load_by_postcode(code_cp)
+            rows = self.load_by_postcode(code_cp)
+            if rows:
+                return rows
+
+        # BAN street fallback for adjacent/boundary communes when partition is empty
+        if street_name:
+            dept = (code_cp or code_insee or "")[:2]
+            if dept:
+                try:
+                    from .spatial import SpatialResolver
+                    sp = SpatialResolver()
+                    ban_insee = sp.resolve_commune_by_street(dept, street_name)
+                    if ban_insee and ban_insee != code_insee:
+                        ban_rows = self.load_by_insee(ban_insee)
+                        if ban_rows:
+                            return ban_rows
+                except Exception:
+                    pass
         return []
 
     def load_by_department(self, insee: Optional[str], postcode: Optional[str]) -> List[dict]:
@@ -309,6 +327,7 @@ class PartitionedCandidateStore:
         *,
         mega_insee_max_rows: int = 100_000,
         mega_insee_policy: str = "cp_filter_insee",
+        street_name: str = "",
         logger: Optional[object] = None,
     ) -> List[dict]:
         """Load candidates using the strict geographic resolution hierarchy.
@@ -317,7 +336,8 @@ class PartitionedCandidateStore:
           1. crm_insee present  -> load_by_insee() directly (authoritative)
           2. crm_insee absent   -> discover child INSEE codes from the CP partition,
                                    then load_by_insee() for each discovered INSEE code
-          3. No results at all  -> log GEO_RESOLUTION_EMPTY and return []
+          3. Empty partition    -> BAN street fallback for adjacent/boundary communes
+          4. No results at all  -> log GEO_RESOLUTION_EMPTY and return []
 
         This method never loads the entire CP partition blindly.
         It never performs a department-level fallback.
@@ -328,6 +348,7 @@ class PartitionedCandidateStore:
             crm_id:              CRM entry identifier for logging.
             mega_insee_max_rows: Threshold above which mega-commune policy applies.
             mega_insee_policy:   Policy for mega-communes ("cp_filter_insee" / "full_insee").
+            street_name:         Optional street name from CRM for BAN boundary fallback.
             logger:              Optional logger instance (uses module logger if None).
         """
         import logging as _logging
@@ -343,6 +364,7 @@ class PartitionedCandidateStore:
                 code_cp,
                 mega_insee_max_rows=mega_insee_max_rows,
                 mega_insee_policy=mega_insee_policy,
+                street_name=street_name,
             )
             if rows:
                 return rows
@@ -368,6 +390,7 @@ class PartitionedCandidateStore:
                         code_cp,
                         mega_insee_max_rows=mega_insee_max_rows,
                         mega_insee_policy=mega_insee_policy,
+                        street_name=street_name,
                     )
                     for r in partial:
                         siret = str(r.get("siret") or "")
@@ -381,7 +404,26 @@ class PartitionedCandidateStore:
                     code_cp, crm_id,
                 )
 
-        # --- Step 3: No results — log cleanly and return empty ---
+        # --- Step 3: BAN street fallback when all partition lookups are empty ---
+        if street_name:
+            dept = (code_cp or code_insee or "")[:2]
+            if dept:
+                try:
+                    from .spatial import SpatialResolver
+                    sp = SpatialResolver()
+                    ban_insee = sp.resolve_commune_by_street(dept, street_name)
+                    if ban_insee and ban_insee != code_insee:
+                        ban_rows = self.load_by_insee(ban_insee)
+                        if ban_rows:
+                            _log.info(
+                                "GEO_RESOLUTION: BAN rescued crm_id=%s from %s to %s via street '%s'",
+                                crm_id, code_insee, ban_insee, street_name,
+                            )
+                            return ban_rows
+                except Exception:
+                    pass
+
+        # --- Step 4: No results — log cleanly and return empty ---
         _log.warning(
             "GEO_RESOLUTION_EMPTY: No candidates found for crm_id=%s "
             "(insee=%s, postcode=%s). Returning empty pool.",

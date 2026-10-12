@@ -244,6 +244,37 @@ class SpatialResolver:
         # Tier 5: Commune centroid fallback (only if address exists)
         return data.commune_centroid
 
+    def resolve_commune_by_street(self, dept: str, street_name: str) -> Optional[str]:
+        """Resolve official INSEE code from street name within department via BAN."""
+        if not self.is_available or not dept or not street_name:
+            return None
+        from .sidecar import FRENCH_STREET_TYPES
+        words = re.findall(r"[A-Za-z0-9]+", str(street_name).upper())
+        key_tokens = [
+            w for w in words
+            if len(w) >= 4 and w not in FRENCH_STREET_TYPES and w not in ("SAINT", "SAINTE")
+        ]
+        if not key_tokens:
+            key_tokens = [w for w in words if len(w) >= 3 and w not in FRENCH_STREET_TYPES]
+        if not key_tokens:
+            return None
+
+        clean_dept = str(dept).strip().zfill(2)[:2]
+        try:
+            assert self._con is not None
+            # Build query with all key tokens
+            clause = " AND ".join(["nom_voie ILIKE ?"] * len(key_tokens))
+            params = [f"{clean_dept}%"] + [f"%{tok}%" for tok in key_tokens]
+            res = self._con.execute(
+                f"SELECT insee FROM ban_adresses WHERE insee LIKE ? AND {clause} LIMIT 1",
+                params,
+            ).fetchone()
+            if res and res[0]:
+                return str(res[0]).strip().zfill(5)
+        except Exception as e:
+            logger.debug("Failed resolving commune by street in BAN: %s", e)
+        return None
+
     def compute_spatial_features(
         self,
         crm_row: Dict[str, Any],
