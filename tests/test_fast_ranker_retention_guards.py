@@ -109,7 +109,7 @@ def test_guard1_signal_gated_intra_siren_compaction():
     }
     idf_map = {"CHANCEL": 8.5, "DISTRIBUTION": 2.1}
 
-    cfg = RetentionGuardConfig(top_k=50)
+    cfg = RetentionGuardConfig(top_k=50, intra_siren_min_rank_eviction=0)
     retained_indices, retained_sirets = apply_retention_topk(
         candidates=candidates,
         scores=scores,
@@ -236,10 +236,12 @@ def test_matrix_features_integration():
     feat_matrix[52, 0] = 1.0  # is_siege = 1
 
     scores = np.linspace(1.0, 0.0, n)
+    cfg = RetentionGuardConfig(top_k=50, enable_siege_promotion=True)
     retained_indices, retained_sirets = apply_retention_topk(
         candidates=candidates,
         scores=scores,
         top_k=50,
+        config=cfg,
         feat_matrix=feat_matrix,
         feature_names=feature_names,
     )

@@ -51,9 +51,11 @@ class RetentionGuardConfig:
     top_k: int = 50
     tail_search_max: int = 200
     max_swaps: int = 8
+    enable_siege_promotion: bool = False  # Disabled by default to protect secondary establishments
 
     # Guard 1: Signal-Gated Intra-SIREN Compaction
     intra_siren_trigger_count: int = 3
+    intra_siren_min_rank_eviction: int = 15  # Candidates in top-15 raw are immune from clone eviction
     signal_street_name_jaro_min: float = 0.75
     signal_addr_jaro_min: float = 0.80
     signal_enseigne_jaro_min: float = 0.70
@@ -91,8 +93,8 @@ def apply_retention_topk(
 ) -> Tuple[List[int], List[str]]:
     """
     Ranks candidates by XGBoost score and applies 3-stage retention safeguards:
-      - Preserves Siège Social & Sidecar Anchors.
-      - Guard 1: Signal-gated intra-SIREN compaction (prevents passive clone clutter).
+      - Preserves Sidecar Anchors and high-confidence nominal matches.
+      - Guard 1: Signal-gated intra-SIREN compaction (prevents passive clone clutter in tail).
       - Guard 2: Address density dampening (evicts pure co-tenants without name link).
       - Guard 3: IDF rarity anchor (promotes rare-token & high-similarity candidates).
 
@@ -141,12 +143,16 @@ def apply_retention_topk(
                 pass
         return default
 
-    # Extract CRM tokens for Guard 3 IDF overlap
+    # Extract CRM tokens and address presence
     crm_name = ""
     crm_tokens: Set[str] = set()
+    crm_has_street = False
     if crm_row is not None:
         crm_name = str(crm_row.get("crm_name") or crm_row.get("Client final") or "")
         crm_tokens = _extract_tokens(crm_name, min_len=cfg.idf_token_min_len)
+        addr_str = str(crm_row.get("crm_adresse") or crm_row.get("crm_address") or crm_row.get("Adresse") or "").strip()
+        st_str = str(crm_row.get("crm_street_name") or "").strip()
+        crm_has_street = (len(addr_str) >= 3 and addr_str.lower() != "nan") or (len(st_str) >= 3 and st_str.lower() != "nan")
 
     effective_idf_map = name_idf_map if name_idf_map is not None else _GLOBAL_NAME_IDF
 
@@ -162,14 +168,15 @@ def apply_retention_topk(
         s = str(c.get("siret") or "").strip().zfill(14)
         siren = s[:9]
 
-        is_siege = bool(c.get("is_siege", False)) or (_get_val(cand_idx, "is_siege", "is_siege") == 1.0)
-        is_sidecar = bool(c.get("_is_sidecar_match") or c.get("is_sidecar_match"))
+        # Rule A: Optional Siège Social promotion (if enabled)
+        if cfg.enable_siege_promotion:
+            is_siege = bool(c.get("is_siege", False)) or (_get_val(cand_idx, "is_siege", "is_siege") == 1.0)
+            if is_siege and siren in siren_counts:
+                tail_candidates_to_promote.append((10.0 + float(scores[cand_idx]), cand_idx, "SIEGE_RETENTION"))
+                seen_promoted.add(cand_idx)
+                continue
 
-        # Rule A: Siège Social of an already active SIREN in top_k
-        if is_siege and siren in siren_counts:
-            tail_candidates_to_promote.append((10.0 + float(scores[cand_idx]), cand_idx, "SIEGE_RETENTION"))
-            seen_promoted.add(cand_idx)
-            continue
+        is_sidecar = bool(c.get("_is_sidecar_match") or c.get("is_sidecar_match"))
 
         # Rule B: Validated Sidecar match (highest priority)
         if is_sidecar:
@@ -238,10 +245,13 @@ def apply_retention_topk(
 
     eviction_priority_slots: List[int] = []
 
-    # 2A. Guard 1: Redundant passive clones of multi-site SIRENs
+    # 2A. Guard 1: Redundant passive clones of multi-site SIRENs (tail of top-k only)
     for siren, slot_list in siren_members_in_topk.items():
         passive_clone_slots: List[int] = []
         for slot in slot_list:
+            if slot < cfg.intra_siren_min_rank_eviction:
+                # Top-ranked candidates are immune from passive clone eviction
+                continue
             c_idx = selected_indices[slot]
             cand = candidates[c_idx]
 
@@ -252,20 +262,26 @@ def apply_retention_topk(
             addr_jaro = _get_val(c_idx, "addr_jaro", "addr_jaro", 0.0)
             enseigne_jaro = _get_val(c_idx, "name_jaro_vs_enseigne", "name_jaro_vs_enseigne", 0.0)
 
-            # Signal Check: Siège, Street, House Number, Address, or Enseigne
+            # Signal Check: Siège, Sidecar, Street, House Number, Address, or Enseigne
             has_positive_signal = (
                 is_siege
                 or is_sidecar
-                or (street_jaro >= cfg.signal_street_name_jaro_min)
-                or (street_num_m >= 1.0)
-                or (addr_jaro >= cfg.signal_addr_jaro_min)
+                or (crm_has_street and street_jaro >= cfg.signal_street_name_jaro_min)
+                or (crm_has_street and street_num_m >= 1.0)
+                or (crm_has_street and addr_jaro >= cfg.signal_addr_jaro_min)
                 or (enseigne_jaro >= cfg.signal_enseigne_jaro_min)
             )
+
+            # If CRM has no street, do not penalize candidates with strong name similarity
+            if not crm_has_street:
+                name_jaro = _get_val(c_idx, "name_jaro_max", "name_jaro_max", 0.0)
+                if name_jaro >= 0.70 or enseigne_jaro >= cfg.signal_enseigne_jaro_min:
+                    has_positive_signal = True
 
             if not has_positive_signal:
                 passive_clone_slots.append(slot)
 
-        # Preserve the top-1 passive clone, mark subsequent clones as eviction slots
+        # Preserve the top passive clone, mark subsequent clones as eviction slots
         if len(passive_clone_slots) > 1:
             for evict_slot in passive_clone_slots[1:]:
                 if evict_slot not in eviction_priority_slots:
@@ -278,9 +294,8 @@ def apply_retention_topk(
         c_idx = selected_indices[slot]
         cand = candidates[c_idx]
 
-        is_siege = bool(cand.get("is_siege", False)) or (_get_val(c_idx, "is_siege", "is_siege") == 1.0)
         is_sidecar = bool(cand.get("_is_sidecar_match") or cand.get("is_sidecar_match"))
-        if is_siege or is_sidecar:
+        if is_sidecar:
             continue
 
         density = _get_val(c_idx, "address_density", "_xgb_addr_density_insee", 1.0)
@@ -291,19 +306,18 @@ def apply_retention_topk(
         if density >= cfg.density_threshold and name_jaro < cfg.density_name_jaro_min and tok_overlap == 0.0:
             eviction_priority_slots.append(slot)
 
-    # 2C. Fallback: Bottom slots of top-k without siege, sidecar, or strong name protection
-    for slot in range(cfg.top_k - 1, 0, -1):
+    # 2C. Fallback: Bottom slots of top-k without sidecar or strong name protection
+    for slot in range(cfg.top_k - 1, max(cfg.intra_siren_min_rank_eviction, 0), -1):
         if slot in eviction_priority_slots:
             continue
         c_idx = selected_indices[slot]
         cand = candidates[c_idx]
-        is_siege = bool(cand.get("is_siege", False)) or (_get_val(c_idx, "is_siege", "is_siege") == 1.0)
         is_sidecar = bool(cand.get("_is_sidecar_match") or cand.get("is_sidecar_match"))
         name_jaro = _get_val(c_idx, "name_jaro_max", "name_jaro_max", 0.0)
         tok_overlap = _get_val(c_idx, "name_token_overlap_max", "name_token_overlap_max", 0.0)
         has_name_signal = (name_jaro >= 0.70) or (tok_overlap > 0.0)
 
-        if not is_siege and not is_sidecar and not has_name_signal:
+        if not is_sidecar and not has_name_signal:
             eviction_priority_slots.append(slot)
 
     # -------------------------------------------------------------------------
