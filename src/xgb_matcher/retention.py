@@ -68,6 +68,16 @@ class RetentionGuardConfig:
     idf_token_min_len: int = 4
     name_rescue_jaro_min: float = 0.85
 
+    # Guard 4: Public Administration (Mairie/Hôtel de Ville) Discrimination
+    enable_mairie_siege_rescue: bool = True
+
+    # Guard 5: Mono-Occupant Strict Physical Address Rescue (Immediate Tail 51-100)
+    enable_mono_occupant_address_rescue: bool = True
+    mono_occupant_tail_max: int = 100
+    mono_occupant_street_name_jaro_min: float = 0.80
+    mono_occupant_addr_jaro_min: float = 0.75
+    mono_occupant_name_jaro_min: float = 0.50
+
 
 def _extract_tokens(text: str, min_len: int = 3) -> Set[str]:
     """Helper to tokenize text on alphanumeric word boundaries, removing common stopwords."""
@@ -155,10 +165,25 @@ def apply_retention_topk(
 
     effective_idf_map = name_idf_map if name_idf_map is not None else _GLOBAL_NAME_IDF
 
+    # Guard 4 preparation: Detect municipal administration query (Mairie/Hôtel de Ville)
+    crm_norm = normalize_name(crm_name).upper() if crm_name else ""
+    is_mairie_query = False
+    if cfg.enable_mairie_siege_rescue and crm_norm:
+        mairie_keywords = ("HOTEL DE VILLE", "HOTEL VILLE", "MAIRIE")
+        secondary_public_keywords = (
+            "ECOLE", "GROUPE SCOLAIRE", "COLLEGE", "LYCEE", "GYMNASE", "PISCINE",
+            "CRECHE", "CONSERVATOIRE", "STADE", "CENTRE SOCIAL", "CCAS", "EHPAD",
+            "POLICE MUNICIPALE", "RESTAURANT SCOLAIRE", "CANTINE", "SALLE DES FETES",
+        )
+        has_mairie_kw = any(kw in crm_norm for kw in mairie_keywords)
+        has_secondary_kw = any(kw in crm_norm for kw in secondary_public_keywords)
+        if has_mairie_kw and not has_secondary_kw:
+            is_mairie_query = True
+
     # -------------------------------------------------------------------------
     # 1. Identify Candidate Protections in Tail (ranks top_k to min(n_cands, tail_search_max))
     # -------------------------------------------------------------------------
-    tail_candidates_to_promote: List[Tuple[int, str]] = []
+    tail_candidates_to_promote: List[Tuple[float, int, str]] = []
     seen_promoted: Set[int] = set()
 
     for rank_idx in range(cfg.top_k, min(n_cands, cfg.tail_search_max)):
@@ -182,6 +207,19 @@ def apply_retention_topk(
             tail_candidates_to_promote.append((100.0 + float(scores[cand_idx]), cand_idx, "SIDECAR_RETENTION"))
             seen_promoted.add(cand_idx)
             continue
+
+        # Rule B-bis: Guard 4 - Public Administration (Mairie/Hôtel de Ville) Siège Rescue
+        if is_mairie_query:
+            cj = str(c.get("cj_ul") or c.get("categorieJuridiqueUniteLegale") or "")
+            if cj in ("7210", "7220"):
+                is_siege = bool(c.get("is_siege", False)) or (_get_val(cand_idx, "is_siege", "is_siege") == 1.0)
+                naf_etab = str(c.get("activitePrincipaleEtablissement") or c.get("naf") or "").replace(".", "").upper()
+                naf_ul = str(c.get("activitePrincipaleUniteLegale") or "").replace(".", "").upper()
+                is_admin_publique = (naf_etab.startswith("8411") or naf_ul.startswith("8411") or not naf_etab)
+                if is_siege and is_admin_publique:
+                    tail_candidates_to_promote.append((45.0 + float(scores[cand_idx]), cand_idx, "MAIRIE_SIEGE_RETENTION"))
+                    seen_promoted.add(cand_idx)
+                    continue
 
         # Rule C: Guard 3 - IDF Specificity Anchor (rare distinct token shared with CRM)
         cand_name_fields = [
@@ -224,6 +262,34 @@ def apply_retention_topk(
                 tail_candidates_to_promote.append((30.0 + name_jaro * 10.0, cand_idx, "HIGH_NAME_RESCUE"))
                 seen_promoted.add(cand_idx)
                 continue
+
+        # Rule E: Guard 5 - Mono-Occupant Strict Physical Address Rescue (ranks top_k to mono_occupant_tail_max)
+        if cfg.enable_mono_occupant_address_rescue and rank_idx < cfg.mono_occupant_tail_max and crm_has_street:
+            density = _get_val(cand_idx, "address_density", "_xgb_addr_density_insee", 1.0)
+            if density <= 1.0:
+                street_num_m = _get_val(cand_idx, "street_number_match", "street_number_match", 0.0)
+                street_jaro = _get_val(cand_idx, "street_name_jaro", "street_name_jaro", 0.0)
+                addr_jaro = _get_val(cand_idx, "addr_jaro", "addr_jaro", 0.0)
+
+                is_addr_match = (street_num_m >= 1.0) and (
+                    street_jaro >= cfg.mono_occupant_street_name_jaro_min
+                    or addr_jaro >= cfg.mono_occupant_addr_jaro_min
+                )
+
+                if is_addr_match:
+                    tok_overlap = _get_val(cand_idx, "name_token_overlap_max", "name_token_overlap_max", 0.0)
+                    etab_sim = _get_val(cand_idx, "name_sim_max_etab", "name_sim_max_etab", 0.0)
+                    has_minimal_name = (
+                        (name_jaro >= cfg.mono_occupant_name_jaro_min)
+                        or (tok_overlap > 0.0)
+                        or (etab_sim >= cfg.mono_occupant_name_jaro_min)
+                    )
+                    if has_minimal_name:
+                        tail_candidates_to_promote.append(
+                            (20.0 + float(scores[cand_idx]), cand_idx, "MONO_OCCUPANT_ADDRESS_RESCUE")
+                        )
+                        seen_promoted.add(cand_idx)
+                        continue
 
     if not tail_candidates_to_promote:
         return selected_indices, selected_sirets

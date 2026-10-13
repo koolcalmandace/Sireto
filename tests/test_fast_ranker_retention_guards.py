@@ -273,3 +273,144 @@ def test_high_name_rescue():
     assert len(retained_sirets) == 50
     assert target_siret in retained_sirets
 
+
+def test_guard4_mairie_siege_rescue():
+    """Verify that a municipal town hall query (Hotel de Ville) rescues the commune's head office."""
+    n = 60
+    candidates = [{"siret": f"400000{i:03d}00010", "is_siege": False} for i in range(n)]
+
+    # Slot 52: Commune de Caen - Hôtel de Ville (Siège, NAF 84.11Z)
+    commune_siren = "211401187"
+    mairie_siret = f"{commune_siren}00019"
+    candidates[52] = {
+        "siret": mairie_siret,
+        "denomination": "COMMUNE DE CAEN",
+        "cj_ul": "7210",
+        "is_siege": True,
+        "activitePrincipaleEtablissement": "84.11Z",
+    }
+
+    # Slot 10: École communale of the same commune in top-50
+    candidates[10] = {
+        "siret": f"{commune_siren}00450",
+        "denomination": "COMMUNE DE CAEN",
+        "denominationUsuelleEtablissement": "ECOLE MATERNELLE SAINT PAUL",
+        "cj_ul": "7210",
+        "is_siege": False,
+        "activitePrincipaleEtablissement": "85.10Z",
+    }
+
+    scores = np.linspace(1.0, 0.0, n)
+    crm_row = {"crm_name": "Hotel de ville Caen", "crm_adresse": "Esplanade jean marie Louvel"}
+
+    retained_indices, retained_sirets = apply_retention_topk(
+        candidates=candidates,
+        scores=scores,
+        top_k=50,
+        crm_row=crm_row,
+    )
+
+    assert len(retained_sirets) == 50
+    assert mairie_siret in retained_sirets
+
+
+def test_guard4_no_hijacking_on_secondary_public_equipment():
+    """Verify that an equipment query (Ecole) does NOT hijack or promote the town hall head office."""
+    n = 60
+    candidates = [{"siret": f"500000{i:03d}00010", "is_siege": False} for i in range(n)]
+
+    commune_siren = "211401187"
+    mairie_siret = f"{commune_siren}00019"
+    # Slot 52: Mairie siège in tail
+    candidates[52] = {
+        "siret": mairie_siret,
+        "denomination": "COMMUNE DE CAEN",
+        "cj_ul": "7210",
+        "is_siege": True,
+        "activitePrincipaleEtablissement": "84.11Z",
+        "name_jaro_max": 0.45,
+    }
+
+    # Slot 5: École communale in top-50
+    ecole_siret = f"{commune_siren}00450"
+    candidates[5] = {
+        "siret": ecole_siret,
+        "denomination": "COMMUNE DE CAEN",
+        "denominationUsuelleEtablissement": "ECOLE MATERNELLE PAUL BERT",
+        "cj_ul": "7210",
+        "is_siege": False,
+        "activitePrincipaleEtablissement": "85.10Z",
+        "name_jaro_max": 0.88,
+    }
+
+    scores = np.linspace(1.0, 0.0, n)
+    # Query is explicitly targeting an école
+    crm_row = {"crm_name": "ECOLE PRIMAIRE PAUL BERT CAEN", "crm_adresse": "Rue Paul Bert"}
+
+    retained_indices, retained_sirets = apply_retention_topk(
+        candidates=candidates,
+        scores=scores,
+        top_k=50,
+        crm_row=crm_row,
+    )
+
+    assert len(retained_sirets) == 50
+    assert ecole_siret in retained_sirets
+    # Mairie head office in tail should NOT be promoted over schools
+    assert mairie_siret not in retained_sirets
+
+
+def test_guard5_mono_occupant_address_rescue():
+    """Verify that an exact physical address match in tail (rank < 100) is rescued if mono-occupant."""
+    n = 70
+    candidates = [{"siret": f"600000{i:03d}00010", "is_siege": False} for i in range(n)]
+
+    target_siret = candidates[65]["siret"]
+    candidates[65].update({
+        "street_number_match": 1.0,
+        "street_name_jaro": 0.92,
+        "address_density": 1.0,  # Strictly single occupant
+        "name_jaro_max": 0.58,   # Mild nominal signal
+    })
+
+    scores = np.linspace(1.0, 0.0, n)
+    crm_row = {"crm_name": "ENTREPRISE DUPONT", "crm_adresse": "12 RUE DE LA GARE"}
+
+    retained_indices, retained_sirets = apply_retention_topk(
+        candidates=candidates,
+        scores=scores,
+        top_k=50,
+        crm_row=crm_row,
+    )
+
+    assert len(retained_sirets) == 50
+    assert target_siret in retained_sirets
+
+
+def test_guard5_blocked_on_multi_tenant_address():
+    """Verify that an address match in tail is NOT promoted if the address has multiple tenants (density > 1)."""
+    n = 70
+    candidates = [{"siret": f"700000{i:03d}00010", "is_siege": False} for i in range(n)]
+
+    target_siret = candidates[65]["siret"]
+    candidates[65].update({
+        "street_number_match": 1.0,
+        "street_name_jaro": 0.92,
+        "address_density": 12.0,  # Multi-tenant commercial zone / incubator
+        "name_jaro_max": 0.58,
+    })
+
+    scores = np.linspace(1.0, 0.0, n)
+    crm_row = {"crm_name": "ENTREPRISE DUPONT", "crm_adresse": "12 RUE DE LA GARE"}
+
+    retained_indices, retained_sirets = apply_retention_topk(
+        candidates=candidates,
+        scores=scores,
+        top_k=50,
+        crm_row=crm_row,
+    )
+
+    assert len(retained_sirets) == 50
+    # Must NOT be promoted to prevent co-tenant noise
+    assert target_siret not in retained_sirets
+
