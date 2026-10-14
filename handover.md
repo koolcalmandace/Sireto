@@ -82,6 +82,20 @@
    - Éradication formelle de la règle post-hoc `_promote_open_over_closed` dans `infer.py` et `train_xgb_decider.py` : le classement est désormais 100% data-driven par le gradient boosting XGBoost sans aucune permutation manuelle.
    - Élimination des listes statiques de tokens (`ASSOCIATION_TOKENS`, `SCHOOL_TOKENS` dans `features.py`) au profit de la classification officielle INSEE `cj_ul.startswith("92")` et de la projection continue vectorielle NAF.
    - Validation mathématique de `is_copropriete` (`cj_ul == '9110'`) comme feature continue d'arbre complétée par la macro-catégorie `legal_form_category` sans exclusion dure.
+9. **Catalogue & Feuille de Route du Réentraînement Final V8 (Retrieval & Fast Ranker)** :
+   - *Constat de Performance* : Le socle actuel de Retrieval et Stage 1 est très robuste (Pool : 96.07% Global / 98.18% Actif ; Hit@50 : 93.16% Global / 95.63% Actif @ 75.04% Hit@1).
+   - *Principe Méthodologique* : Aucun bricolage post-hoc en Python. Les 208 cas near-misses (51-100) et les cas d'indépendants/toponymes seront captés nativement via un réentraînement propre programmé après la complétion du cycle V7.
+   - *Catalogue des 4 éléments à intégrer au réentraînement* :
+     1. **Levier B (Noms civils natifs)** : Indexation native de la double permutation ("Prénom Nom" & "Nom Prénom") dans `candidate_tfidf_text` et création de la feature continue `civil_name_jaro` (capitalisant sur les 70.3% d'EI à nom visible).
+     2. **Levier C (Toponymie native)** : Extraction systématique des toponymes ZAC / Centres commerciaux de `complementAdresse` dès le Retrieval TF-IDF (captant nativement les cas comme GrandOptical Cap 3000).
+     3. **Levier A (Densité sectorielle NAF native)** : Injection du score vectoriel continu NAF dans le vecteur d'arbres XGBoost.
+     4. **Fonction de perte optimisée Top-50** : Calibration de la loss XGBoost sur `ndcg@50` (au lieu de `ndcg@5`) pour pénaliser directement les sorties hors du Top-50 et aspirer naturellement les near-misses.
+   - *Séquence de Déploiement Cadrée* :
+     1. Exécuter l'Étape 6e (Risk Model & Détecteur d'incertitude) et mesurer la baseline V7 complète.
+     2. Valider l'Étape 6f (Validation E2E et couverture Fallback Places).
+     3. Lancer le réentraînement ciblé de Retrieval & Stage 1 (modèle `xgbranker_fast_v9.json`) avec les 4 éléments catalogués.
+     4. Recalibrer en 2 minutes le seuil du Stage 3 (Risk Model) sur la nouvelle distribution.
+     5. Certifier le résultat final de production.
 
 ---
 
