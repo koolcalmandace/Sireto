@@ -59,10 +59,11 @@ timeline
 
 | Nom de Branche | Base | Rôle / Objectif | Statut |
 | :--- | :--- | :--- | :---: |
-| `main` | - | Branche stable de production (V7 baseline). | Active / Protégée |
+| `main` | - | Branche stable de production (synchronisée fast-forward sur fe40e4f / f6eca51). | Active / Synchronisée |
 | `feature/geo-resolution-and-crm-expansion` | `main` | Implémentation résolution géo stricte, benchmarks 17k/15k, résilience batch et fusion CRM 32 570. | **Validée (Étapes 1-4)** |
 | `feature/v8-national-partitions-and-retrieval` | `feature/geo-resolution-and-crm-expansion` | Intégration Store National V8, expansion sectorielle publique vectorielle et repêchage densité. | **Validée (Étape 5)** |
-| `feature/tfidf-semantic-prototypes-and-partition-completion` | `feature/v8-national-partitions-and-retrieval` | Prototypes TF-IDF étendus (6 familles), cap adresse universel à 10 et réparation des 12 départements manquants. | **Active (Courante)** |
+| `feature/fast-ranker-v8-unified-ban` | `feature/v8-national-partitions-and-retrieval` | Fast Ranker V8 unifié 42 features BAN DuckDB, vectorisation matricielle instantanée, baseline 32k. | **Validée (Étape 6c-6d)** |
+| `feature/retention-sanitization-secondary-establishments` | `feature/fast-ranker-v8-unified-ban` | Rétention assainie des secondaires (Guards 1-5), fallback Parquet CP, enrichissement complementAdresse BAN, intégrée dans `main`. | **Validée (Étapes 6d-bis à 6d-sexies)** |
 | `archive/pipe-v6-llm` | - | Sauvegarde de l'ancienne version avec LLMs. | Archivée |
 
 ---

@@ -634,12 +634,12 @@ def build_candidate_pool(
             addr_idx: List[int] = []
             if addr_vec is not None and addr_mat is not None and crm_address:
                 addr_idx = prefilter_candidates_address_tfidf(
-                    crm_address, addr_vec, addr_mat, 50,
+                    crm_address, addr_vec, addr_mat, config.prefilter_k,
                 )
 
             # Strict inclusion: keep 100% of name candidates (up to prefilter_k)
-            # and append top-50 candidates by physical address concordance
-            sparse_idx = list(dict.fromkeys(name_idx + addr_idx[:50]))
+            # and union with physical address concordance candidates
+            sparse_idx = list(dict.fromkeys(name_idx + addr_idx))
 
         # 4b. Dense retrieval (FAISS) — if enabled and available
         dense_idx: List[int] = []

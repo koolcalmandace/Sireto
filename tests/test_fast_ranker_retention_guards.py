@@ -303,10 +303,12 @@ def test_guard4_mairie_siege_rescue():
     scores = np.linspace(1.0, 0.0, n)
     crm_row = {"crm_name": "Hotel de ville Caen", "crm_adresse": "Esplanade jean marie Louvel"}
 
+    cfg = RetentionGuardConfig(enable_mairie_siege_rescue=True)
     retained_indices, retained_sirets = apply_retention_topk(
         candidates=candidates,
         scores=scores,
         top_k=50,
+        config=cfg,
         crm_row=crm_row,
     )
 
@@ -347,10 +349,12 @@ def test_guard4_no_hijacking_on_secondary_public_equipment():
     # Query is explicitly targeting an école
     crm_row = {"crm_name": "ECOLE PRIMAIRE PAUL BERT CAEN", "crm_adresse": "Rue Paul Bert"}
 
+    cfg = RetentionGuardConfig(enable_mairie_siege_rescue=True)
     retained_indices, retained_sirets = apply_retention_topk(
         candidates=candidates,
         scores=scores,
         top_k=50,
+        config=cfg,
         crm_row=crm_row,
     )
 
@@ -361,7 +365,7 @@ def test_guard4_no_hijacking_on_secondary_public_equipment():
 
 
 def test_guard5_mono_occupant_address_rescue():
-    """Verify that an exact physical address match in tail (rank < 100) is rescued if mono-occupant."""
+    """Verify that an exact physical address match in tail (rank < 100) is rescued if mono-occupant when enabled."""
     n = 70
     candidates = [{"siret": f"600000{i:03d}00010", "is_siege": False} for i in range(n)]
 
@@ -376,10 +380,12 @@ def test_guard5_mono_occupant_address_rescue():
     scores = np.linspace(1.0, 0.0, n)
     crm_row = {"crm_name": "ENTREPRISE DUPONT", "crm_adresse": "12 RUE DE LA GARE"}
 
+    cfg = RetentionGuardConfig(enable_mono_occupant_address_rescue=True)
     retained_indices, retained_sirets = apply_retention_topk(
         candidates=candidates,
         scores=scores,
         top_k=50,
+        config=cfg,
         crm_row=crm_row,
     )
 

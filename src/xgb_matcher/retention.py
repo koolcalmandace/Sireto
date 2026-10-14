@@ -69,10 +69,10 @@ class RetentionGuardConfig:
     name_rescue_jaro_min: float = 0.85
 
     # Guard 4: Public Administration (Mairie/Hôtel de Ville) Discrimination
-    enable_mairie_siege_rescue: bool = True
+    enable_mairie_siege_rescue: bool = False  # Disabled to prevent post-hoc promotion
 
     # Guard 5: Mono-Occupant Strict Physical Address Rescue (Immediate Tail 51-100)
-    enable_mono_occupant_address_rescue: bool = True
+    enable_mono_occupant_address_rescue: bool = False  # Disabled to prevent post-hoc promotion
     mono_occupant_tail_max: int = 100
     mono_occupant_street_name_jaro_min: float = 0.80
     mono_occupant_addr_jaro_min: float = 0.75
