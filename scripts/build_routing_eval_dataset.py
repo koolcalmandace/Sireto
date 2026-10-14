@@ -10,10 +10,11 @@ from __future__ import annotations
 import argparse
 import csv
 import re
+import sys
 from pathlib import Path
 from typing import Dict, Iterable, Tuple
-
 import pandas as pd
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.xgb_matcher.routing_risk import BASE_FEATURES
 

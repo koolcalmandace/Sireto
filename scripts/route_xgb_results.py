@@ -34,18 +34,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from xgb_matcher.routing_risk import build_feature_row, default_feature_columns
-
-
-class IsotonicCalibrator:
-    def __init__(self, base_estimator, iso_reg):
-        self.base_estimator = base_estimator
-        self.iso_reg = iso_reg
-
-    def predict_proba(self, X):
-        proba = self.base_estimator.predict_proba(X)[:, 1]
-        calibrated = self.iso_reg.predict(proba)
-        calibrated = np.clip(calibrated, 0, 1)
-        return np.column_stack([1 - calibrated, calibrated])
+from xgb_matcher.calibration import IsotonicCalibrator, load_calibrator
 
 
 logging.basicConfig(
@@ -180,8 +169,7 @@ def _load_risk_assets(
             model = pickle.load(f)
 
     if calibrator_path and calibrator_path.exists():
-        with open(calibrator_path, "rb") as f:
-            calibrator = pickle.load(f)
+        calibrator = load_calibrator(calibrator_path)
 
     if not feature_names:
         feature_names = default_feature_columns()

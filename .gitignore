@@ -30,3 +30,4 @@ data/*.duckdb
 *.duckdb
 test_sandbox/
 scratch/
+data/train_checkpoints/

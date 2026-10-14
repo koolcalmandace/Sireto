@@ -27,18 +27,7 @@ from xgboost import XGBClassifier
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.xgb_matcher.routing_risk import BASE_FEATURES, default_feature_columns
-
-
-class IsotonicCalibrator:
-    def __init__(self, base_estimator, iso_reg):
-        self.base_estimator = base_estimator
-        self.iso_reg = iso_reg
-
-    def predict_proba(self, X):
-        proba = self.base_estimator.predict_proba(X)[:, 1]
-        calibrated = self.iso_reg.predict(proba)
-        calibrated = np.clip(calibrated, 0, 1)
-        return np.column_stack([1 - calibrated, calibrated])
+from src.xgb_matcher.calibration import IsotonicCalibrator
 
 
 def _parse_args() -> argparse.Namespace:
