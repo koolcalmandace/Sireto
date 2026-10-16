@@ -72,7 +72,7 @@ class RetentionGuardConfig:
     enable_mairie_siege_rescue: bool = False  # Disabled to prevent post-hoc promotion
 
     # Guard 5: Mono-Occupant Strict Physical Address Rescue (Immediate Tail 51-100)
-    enable_mono_occupant_address_rescue: bool = False  # Disabled to prevent post-hoc promotion
+    enable_mono_occupant_address_rescue: bool = True  # Enabled for strict physical mono-occupant candidates
     mono_occupant_tail_max: int = 100
     mono_occupant_street_name_jaro_min: float = 0.80
     mono_occupant_addr_jaro_min: float = 0.75
@@ -317,7 +317,7 @@ def apply_retention_topk(
             c_idx = selected_indices[slot]
             cand = candidates[c_idx]
 
-            is_siege = bool(cand.get("is_siege", False)) or (_get_val(c_idx, "is_siege", "is_siege") == 1.0)
+            is_siege = bool(cand.get("is_siege", False)) or bool(cand.get("etablissementSiege", False)) or (_get_val(c_idx, "is_siege", "is_siege") == 1.0)
             is_sidecar = bool(cand.get("_is_sidecar_match") or cand.get("is_sidecar_match"))
             street_jaro = _get_val(c_idx, "street_name_jaro", "street_name_jaro", 0.0)
             street_num_m = _get_val(c_idx, "street_number_match", "street_number_match", 0.0)
@@ -326,6 +326,7 @@ def apply_retention_topk(
             etab_sim = _get_val(c_idx, "name_sim_max_etab", "name_sim_max_etab", 0.0)
             name_jaro = _get_val(c_idx, "name_jaro_max", "name_jaro_max", 0.0)
             tok_overlap = _get_val(c_idx, "name_token_overlap_max", "name_token_overlap_max", 0.0)
+            density = _get_val(c_idx, "address_density", "_xgb_addr_density_insee", 1.0)
 
             # Signal 1: Nom d'usage / Enseigne propre à l'établissement (discrimination nominale)
             has_etab_name_signal = (enseigne_jaro >= cfg.signal_enseigne_jaro_min) or (etab_sim >= 0.70)
@@ -337,6 +338,7 @@ def apply_retention_topk(
                     (street_jaro >= cfg.signal_street_name_jaro_min)
                     or (street_num_m >= 1.0)
                     or (addr_jaro >= cfg.signal_addr_jaro_min)
+                    or (density <= 1.0 and street_jaro >= 0.70)
                 )
 
             # Signal 3: Signal nominal de l'entité
@@ -344,8 +346,6 @@ def apply_retention_topk(
             if not crm_has_street:
                 has_name_signal = (name_jaro >= 0.70) or (tok_overlap > 0.0)
             else:
-                # Si CRM a une adresse mais le candidat en SIRENE n'a pas de voie discriminante (street_jaro == 0.0)
-                # et a une forte similarité nominale (>= 0.85), il s'agit de la même entité sans voie déclarée
                 if (name_jaro >= 0.85) and (street_jaro == 0.0):
                     has_name_signal = True
 
@@ -385,18 +385,34 @@ def apply_retention_topk(
         if density >= cfg.density_threshold and name_jaro < cfg.density_name_jaro_min and tok_overlap == 0.0:
             eviction_priority_slots.append(slot)
 
-    # 2C. Fallback: Bottom slots of top-k without sidecar or strong name protection
+    # 2C. Fallback: Bottom slots of top-k without sidecar, name, physical address, or siege signal
     for slot in range(cfg.top_k - 1, -1, -1):
         if slot in eviction_priority_slots:
             continue
         c_idx = selected_indices[slot]
         cand = candidates[c_idx]
         is_sidecar = bool(cand.get("_is_sidecar_match") or cand.get("is_sidecar_match"))
+        if is_sidecar:
+            continue
+
         name_jaro = _get_val(c_idx, "name_jaro_max", "name_jaro_max", 0.0)
         tok_overlap = _get_val(c_idx, "name_token_overlap_max", "name_token_overlap_max", 0.0)
         has_name_signal = (name_jaro >= 0.70) or (tok_overlap > 0.0)
 
-        if not is_sidecar and not has_name_signal:
+        has_addr_signal = False
+        if crm_has_street:
+            street_num_m = _get_val(c_idx, "street_number_match", "street_number_match", 0.0)
+            street_jaro = _get_val(c_idx, "street_name_jaro", "street_name_jaro", 0.0)
+            addr_jaro = _get_val(c_idx, "addr_jaro", "addr_jaro", 0.0)
+            density = _get_val(c_idx, "address_density", "_xgb_addr_density_insee", 1.0)
+            has_addr_signal = (
+                (street_num_m >= 1.0 and (street_jaro >= cfg.signal_street_name_jaro_min or addr_jaro >= cfg.signal_addr_jaro_min))
+                or (density <= 1.0 and (street_jaro >= 0.80 or addr_jaro >= 0.80))
+            )
+
+        is_siege = bool(cand.get("is_siege", False)) or bool(cand.get("etablissementSiege", False)) or (_get_val(c_idx, "is_siege", "is_siege") == 1.0)
+
+        if not has_name_signal and not has_addr_signal and not is_siege:
             eviction_priority_slots.append(slot)
 
     # -------------------------------------------------------------------------

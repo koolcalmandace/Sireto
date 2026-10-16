@@ -420,3 +420,50 @@ def test_guard5_blocked_on_multi_tenant_address():
     # Must NOT be promoted to prevent co-tenant noise
     assert target_siret not in retained_sirets
 
+
+def test_address_match_in_top50_never_evicted():
+    """
+    Verify that an establishment ranked in the Top-50 by XGBoost with an exact physical
+    address match (street, number, density <= 1) is NEVER evicted by retention fallback,
+    even if the commercial name diverges from the legal name (e.g. HOTEL LE G vs DEVINTINA).
+    """
+    n = 60
+    candidates = [{"siret": f"800000{i:03d}00010", "is_siege": False} for i in range(n)]
+
+    # Slot 28 (Rank 29): Commercial hotel with exact address match and mono-occupancy
+    hotel_siret = candidates[28]["siret"]
+    candidates[28].update({
+        "street_number_match": 1.0,
+        "street_name_jaro": 1.0,
+        "addr_jaro": 1.0,
+        "address_density": 1.0,
+        "name_jaro_max": 0.53,  # Divergent name (HOTEL LE G vs DEVINTINA)
+        "name_token_overlap_max": 0.0,
+        "is_siege": True,
+    })
+
+    # Slot 55: Rare token candidate in tail wanting to promote
+    tail_siret = candidates[55]["siret"]
+    candidates[55].update({
+        "denominationUniteLegale": "SUPERCHANCEL INFORMATIQUE",
+    })
+
+    scores = np.linspace(1.0, 0.1, n)
+    crm_row = {"crm_name": "HOTEL LE G SUPERCHANCEL", "crm_adresse": "1 RUE CASSINI"}
+    idf_map = {"SUPERCHANCEL": 9.5}
+
+    retained_indices, retained_sirets = apply_retention_topk(
+        candidates=candidates,
+        scores=scores,
+        top_k=50,
+        crm_row=crm_row,
+        name_idf_map=idf_map,
+    )
+
+    assert len(retained_sirets) == 50
+    # The tail candidate is promoted
+    assert tail_siret in retained_sirets
+    # The physical address match in top-50 is strictly protected and NOT evicted!
+    assert hotel_siret in retained_sirets
+
+
