@@ -189,6 +189,10 @@ FEATURE_NAMES: List[str] = [
     "spatial_is_very_close",      # 1.0 if distance < 0.100 km (~100m), 0.0 otherwise
     "spatial_is_same_block",      # 1.0 if distance < 0.300 km (~300m), 0.0 otherwise
     "spatial_has_coords",         # 1.0 if both CRM and candidate addresses geocoded successfully, 0.0 otherwise
+    # V9 generic mathematical & categorical features (Stage 1 NDCG@50 & retention)
+    "exact_address_anchor",       # 1.0 if street_number_match == 1.0 and street_name_jaro >= 0.85, 0.0 otherwise
+    "is_commune_authority",       # 1.0 if candidate is local authority (cj in 72xx, 73xx) and in same commune (geo_exact_match == 1.0)
+    "acronym_mutual_token_match", # 1.0 if CRM tokens contain acronym of cand or cand tokens/sigle contain acronym of CRM
 ]
 
 SEMANTIC_FEATURE_NAMES: List[str] = [
@@ -233,11 +237,16 @@ FAST_RANKER_FEATURE_SET: Set[str] = {
     "sidecar_match",
     "is_active",
     "is_siege",
+    "is_association",
     "addr_unsupported_by_name",
+    "full_addr_match_score",
     "spatial_distance_km",
     "spatial_is_very_close",
     "spatial_is_same_block",
     "spatial_has_coords",
+    "exact_address_anchor",
+    "is_commune_authority",
+    "acronym_mutual_token_match",
 }
 
 FAST_RANKER_FEATURE_NAMES: List[str] = [
@@ -1283,6 +1292,46 @@ def make_features_from_preprocessed(
     features["spatial_is_same_block"] = 0.0
     features["spatial_has_coords"] = 0.0
 
+    # -------------------------------------------------------------------------
+    # V9 generic mathematical & categorical features (NDCG@50 alignment)
+    # -------------------------------------------------------------------------
+    # 1. exact_address_anchor: strict physical concordance (exact street number + street name)
+    features["exact_address_anchor"] = float(
+        features.get("street_number_match", 0.0) == 1.0 and addr_features.get("street_name_jaro", 0.0) >= 0.85
+    )
+
+    # 2. is_commune_authority: structural INSEE legal category (72xx = Communes, 73xx = EPCI) in same commune
+    cand_cj = str(cand.get("cj_ul") or "").strip()
+    is_authority_cj = cand_cj.startswith("72") or cand_cj.startswith("73")
+    features["is_commune_authority"] = float(is_authority_cj and features.get("geo_exact_match", 0.0) == 1.0)
+
+    # 3. acronym_mutual_token_match: generic mathematical initialism detection
+    crm_name_raw = normalize_text(str(crm.get("crm_name") or ""))
+    crm_words = [w for w in crm_name_raw.split() if len(w) >= 1 and not w.isdigit()]
+    cand_name_fields = [
+        cand.get("denomination"),
+        cand.get("denomination_ul"),
+        cand.get("enseigne1"),
+        cand.get("nom_ul"),
+    ]
+    cand_words_raw = " ".join(str(f) for f in cand_name_fields if f)
+    cand_words = [w for w in normalize_text(cand_words_raw).split() if len(w) >= 1 and not w.isdigit()]
+
+    acronym_mutual_score = 0.0
+    cand_sigle = str(cand.get("sigle") or cand.get("sigle_ul") or "").strip().upper()
+    if cand_sigle and (cand_sigle in crm_words or cand_sigle in (crm.get("crm_tokens") or set())):
+        acronym_mutual_score = 1.0
+    elif crm_words and cand_words:
+        crm_acronym = "".join(w[0] for w in crm_words)
+        cand_acronym = "".join(w[0] for w in cand_words)
+        cand_set = set(cand_words)
+        crm_set = set(crm_words)
+        if len(crm_acronym) >= 2 and (crm_acronym in cand_set or crm_acronym == cand_sigle):
+            acronym_mutual_score = 1.0
+        elif len(cand_acronym) >= 2 and (cand_acronym in crm_set):
+            acronym_mutual_score = 1.0
+    features["acronym_mutual_token_match"] = acronym_mutual_score
+
     return features
 
 
@@ -1322,6 +1371,7 @@ TEXT_FEATURE_NAMES: List[str] = [
     "name_length_max", "has_person_name", "person_name_jaro_max", "name_city_overlap_max",
     "name_is_city_like_max", "name_norm_exact", "alias_match", "token_overlap_ul",
     "ul_vs_pm_indicator", "name_jaro_vs_enseigne", "name_city_suffix_match",
+    "acronym_mutual_token_match",
 ]
 
 GEO_FEATURE_NAMES: List[str] = [
@@ -1339,11 +1389,13 @@ SPATIAL_FEATURE_NAMES: List[str] = [
 
 ADMIN_FEATURE_NAMES: List[str] = [
     "legal_form_category", "is_siege", "is_association", "is_copropriete", "is_crm_school", "sidecar_match", "is_active",
+    "is_commune_authority",
 ]
 
 INTERACTION_FEATURE_NAMES: List[str] = [
     "name_addr_consistency", "addr_unsupported_by_name", "name_density_penalty",
     "addr_jaro_per_density", "postcode_match_without_addr", "full_addr_match_score",
+    "exact_address_anchor",
 ]
 
 _IDX_TEXT = [FEATURE_NAMES.index(fn) for fn in TEXT_FEATURE_NAMES]

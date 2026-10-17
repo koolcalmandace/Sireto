@@ -51,16 +51,16 @@ from src.xgb_matcher.retrieval_config import RetrievalConfigV1
 from src.xgb_matcher.tfidf_cache import TfidfPersistentCache
 
 MODELS_DIR = PROJECT_ROOT / "models"
-MODEL_PATH = MODELS_DIR / "xgbranker_fast_v8.json"
-META_PATH = MODELS_DIR / "xgbranker_fast_v8_meta.json"
+MODEL_PATH = MODELS_DIR / "xgbranker_fast_v9.json"
+META_PATH = MODELS_DIR / "xgbranker_fast_v9_meta.json"
 
 
 def train_fast_ranker(
     crm_path: Path = PROJECT_ROOT / "data" / "crm_ok_gt_merged_v1.csv",
     partitions_dir: Path = PROJECT_ROOT / "data" / "candidates_v8_national",
-    sample_size: int = 3000,
+    sample_size: int = 10000,
     random_seed: int = 42,
-    num_boost_round: int = 80,
+    num_boost_round: int = 100,
     resume: bool = True,
     chunk_size: int = 500,
     checkpoint_dir: Optional[Path] = None,
@@ -68,7 +68,7 @@ def train_fast_ranker(
 ) -> xgb.Booster:
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     print("=" * 80)
-    print("ENTRAÎNEMENT DU FAST RANKER V8 (STAGE 1)")
+    print("ENTRAÎNEMENT DU FAST RANKER V9 (STAGE 1 - NDCG@50)")
     print(f"Features ({len(FAST_RANKER_FEATURE_NAMES)}) : {FAST_RANKER_FEATURE_NAMES}")
     print(f"Échantillon d'entraînement : {sample_size} requêtes (seed={random_seed})")
     print(f"Atomic Checkpointing : {'Actif (chunk=' + str(chunk_size) + ')' if resume else 'Désactivé'}")
@@ -241,9 +241,9 @@ def train_fast_ranker(
     ddev.set_group(dev_groups)
 
     params = {
-        "objective": "rank:pairwise",
+        "objective": "rank:ndcg",
         "tree_method": "hist",
-        "eta": 0.1,
+        "eta": 0.08,
         "max_depth": 6,
         "subsample": 0.8,
         "colsample_bytree": 0.8,
@@ -287,16 +287,16 @@ def train_fast_ranker(
             indent=2,
         )
 
-    print(f"\n[SUCCÈS] Modèle Fast Ranker V8 sauvegardé dans : {target_model_path}")
+    print(f"\n[SUCCÈS] Modèle Fast Ranker V9 sauvegardé dans : {target_model_path}")
     return booster
 
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Train Fast Ranker V8 Model")
-    parser.add_argument("--sample-size", type=int, default=3000, help="Number of queries for training/dev")
-    parser.add_argument("--rounds", type=int, default=80, help="Number of boosting rounds")
+    parser = argparse.ArgumentParser(description="Train Fast Ranker V9 Model (NDCG@50)")
+    parser.add_argument("--sample-size", type=int, default=10000, help="Number of queries for training/dev")
+    parser.add_argument("--rounds", type=int, default=100, help="Number of boosting rounds")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--no-resume", action="store_true", default=False, help="Disable auto-resume and start fresh")
     parser.add_argument("--chunk-size", type=int, default=500, help="Number of queries per atomic chunk")

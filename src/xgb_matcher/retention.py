@@ -76,7 +76,7 @@ class RetentionGuardConfig:
     mono_occupant_tail_max: int = 100
     mono_occupant_street_name_jaro_min: float = 0.80
     mono_occupant_addr_jaro_min: float = 0.75
-    mono_occupant_name_jaro_min: float = 0.50
+    mono_occupant_name_jaro_min: float = 0.20  # Relaxed from 0.50 for mono-occupants (density <= 1.0) with brand/holding divergence
 
 
 def _extract_tokens(text: str, min_len: int = 3) -> Set[str]:
