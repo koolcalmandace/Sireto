@@ -108,6 +108,7 @@ def evaluate(
     enable_power_monitor: bool = True,
     pause_on_lock: bool = True,
     idle_timeout_seconds: float = 300.0,
+    baseline_details: Optional[Path] = None,
 ) -> Dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     ckpt_dir = output_dir / ".checkpoints"
@@ -179,7 +180,31 @@ def evaluate(
         "hit_20",
         "hit_50",
         "loss_reason",
+        "baseline_hit_50",
+        "baseline_retained_rank",
+        "is_recovered",
     ]
+
+    # Baseline comparison map
+    baseline_map: Dict[str, Dict[str, Any]] = {}
+    if baseline_details and baseline_details.exists():
+        try:
+            logger.info("Chargement des résultats de référence (Baseline) : %s", baseline_details)
+            with open(baseline_details, "r", encoding="utf-8", errors="replace") as f:
+                reader = csv.DictReader(f, delimiter=";")
+                for brow in reader:
+                    cid = (brow.get("crm_id") or "").strip()
+                    if cid:
+                        baseline_map[cid] = {
+                            "hit_50": int(brow.get("hit_50") or 0),
+                            "gt_in_pool": int(brow.get("gt_in_pool") or 0),
+                            "raw_rank": int(brow.get("raw_rank") or -1),
+                            "retained_rank": int(brow.get("retained_rank") or -1),
+                            "loss_reason": (brow.get("loss_reason") or "").strip(),
+                        }
+            logger.info("Baseline chargée : %d requêtes indexées pour détection de repêchage.", len(baseline_map))
+        except Exception as e:
+            logger.warning("Erreur lors de la lecture de la baseline : %s", e)
 
     processed_crm_ids: Set[str] = set()
     is_resumed = False
@@ -188,6 +213,39 @@ def evaluate(
         is_resumed = len(processed_crm_ids) > 0
 
     ckpt.init_details_writer(details_path, detail_fieldnames, resume=is_resumed)
+
+    # Recovered cases live tracking CSV
+    recovered_path = output_dir / f"fast_ranker_{tag}_recovered_cases.csv"
+    recovered_fieldnames = [
+        "crm_id",
+        "crm_name",
+        "crm_insee",
+        "crm_cp",
+        "gt_siret",
+        "gt_etat",
+        "baseline_hit_50",
+        "baseline_retained_rank",
+        "baseline_loss_reason",
+        "new_retained_rank",
+        "new_hit_1",
+        "new_hit_5",
+        "new_hit_10",
+        "new_hit_20",
+        "new_hit_50",
+    ]
+    recovered_file = None
+    recovered_writer = None
+    try:
+        if not is_resumed or not recovered_path.exists():
+            recovered_file = open(recovered_path, "w", encoding="utf-8", newline="")
+            recovered_writer = csv.DictWriter(recovered_file, fieldnames=recovered_fieldnames, delimiter=";")
+            recovered_writer.writeheader()
+            recovered_file.flush()
+        else:
+            recovered_file = open(recovered_path, "a", encoding="utf-8", newline="")
+            recovered_writer = csv.DictWriter(recovered_file, fieldnames=recovered_fieldnames, delimiter=";")
+    except Exception as e:
+        logger.warning("Impossible d'initialiser le fichier de cas repêchés : %s", e)
 
     if processed_crm_ids:
         unprocessed_rows = [
@@ -234,6 +292,10 @@ def evaluate(
     all_hit10 = 0
     all_hit20 = 0
     all_hit50 = 0
+
+    # Repêchages vs Baseline
+    recovered_act_hit50 = 0
+    recovered_all_hit50 = 0
 
     if is_resumed and details_path.exists():
         try:
@@ -414,7 +476,51 @@ def evaluate(
             all_hit10 += hit_10
             all_hit20 += hit_20
             all_hit50 += hit_50
-    
+
+            # Détection repêchage vs baseline
+            base_info = baseline_map.get(crm_id)
+            base_hit50 = base_info["hit_50"] if base_info else -1
+            base_retained_rank = base_info["retained_rank"] if base_info else -1
+            base_loss = base_info.get("loss_reason", "") if base_info else ""
+            is_recovered = 1 if (base_hit50 == 0 and hit_50 == 1) else 0
+
+            if is_recovered:
+                if is_active:
+                    recovered_act_hit50 += 1
+                recovered_all_hit50 += 1
+
+                if recovered_writer and recovered_file:
+                    try:
+                        recovered_writer.writerow({
+                            "crm_id": crm_id,
+                            "crm_name": crm_name,
+                            "crm_insee": insee,
+                            "crm_cp": postcode,
+                            "gt_siret": gt_siret,
+                            "gt_etat": gt_etat,
+                            "baseline_hit_50": base_hit50,
+                            "baseline_retained_rank": base_retained_rank,
+                            "baseline_loss_reason": base_loss,
+                            "new_retained_rank": retained_rank,
+                            "new_hit_1": hit_1,
+                            "new_hit_5": hit_5,
+                            "new_hit_10": hit_10,
+                            "new_hit_20": hit_20,
+                            "new_hit_50": hit_50,
+                        })
+                        recovered_file.flush()
+                    except Exception as e:
+                        logger.warning("Erreur écriture cas repêché %s : %s", crm_id, e)
+
+                logger.info(
+                    "✨ [RÉCUPÉRÉ #%d] CRM %s (%s) : Exclu baseline (%s) -> Top-50 Rang %d !",
+                    recovered_act_hit50 if is_active else recovered_all_hit50,
+                    crm_id,
+                    crm_name,
+                    base_loss or f"Rang {base_retained_rank}",
+                    retained_rank,
+                )
+
             # Enregistrement CSV détail
             ckpt.record_detail({
                 "crm_id": crm_id,
@@ -433,6 +539,9 @@ def evaluate(
                 "hit_20": hit_20,
                 "hit_50": hit_50,
                 "loss_reason": loss_reason if hit_50 == 0 else "",
+                "baseline_hit_50": base_hit50,
+                "baseline_retained_rank": base_retained_rank,
+                "is_recovered": is_recovered,
             })
     
             if len(tfidf_cache) > 40:
@@ -450,7 +559,7 @@ def evaluate(
                 act_rec = (act_hit50 / max(n_active, 1)) * 100
     
                 logger.info(
-                    "[%d/%d] %.1f%% | Vitesse: %.1f req/s | RAM: %.2f Go | Actifs Hit@50: %.2f%% (Rétention: %.2f%%)",
+                    "[%d/%d] %.1f%% | Vitesse: %.1f req/s | RAM: %.2f Go | Actifs Hit@50: %.2f%% (Rétention: %.2f%%) | Repêchés: %d actifs (%d total)",
                     total_processed,
                     len(rows),
                     (total_processed / max(len(rows), 1)) * 100,
@@ -458,9 +567,16 @@ def evaluate(
                     rss_gb,
                     act_rec,
                     act_ret,
+                    recovered_act_hit50,
+                    recovered_all_hit50,
                 )
 
     finally:
+        if recovered_file:
+            try:
+                recovered_file.close()
+            except Exception:
+                pass
         if enable_power_monitor:
             power_mon.stop()
 
@@ -488,6 +604,14 @@ def evaluate(
             "fast_ranker_hit20": (all_hit20 / max(total_processed, 1)) * 100,
             "fast_ranker_hit50": (all_hit50 / max(total_processed, 1)) * 100,
             "retention_rate_from_pool": (all_hit50 / max(all_gt_in_pool, 1)) * 100,
+        },
+        "recovery_vs_baseline": {
+            "baseline_details_file": str(baseline_details) if baseline_details else "",
+            "baseline_total_indexed": len(baseline_map),
+            "baseline_total_dismissed": sum(1 for v in baseline_map.values() if v.get("hit_50") == 0),
+            "recovered_active_queries": recovered_act_hit50,
+            "recovered_all_queries": recovered_all_hit50,
+            "recovered_cases_csv": str(recovered_path),
         },
     }
 
@@ -522,6 +646,7 @@ def main():
     parser.add_argument("--max-rows", type=int, default=None, help="Limite le nombre de requêtes à évaluer")
     parser.add_argument("--log-file", type=Path, default=Path("logs/fast_ranker_32k.log"))
     parser.add_argument("--no-pause-on-lock", action="store_true", default=False, help="Ne pas mettre en pause sur verrouillage de session")
+    parser.add_argument("--baseline-details", type=Path, default=Path("reports/fast_ranker_32k/fast_ranker_32k_v8_unified_ban_details.csv"), help="Chemin du CSV de référence pour identifier les cas repêchés")
     args = parser.parse_args()
 
     rows = load_crm_gt(args.crm)
@@ -543,6 +668,7 @@ def main():
         log_file=args.log_file,
         pause_on_lock=not args.no_pause_on_lock,
         idle_timeout_seconds=999999999.0 if args.no_pause_on_lock else 300.0,
+        baseline_details=args.baseline_details,
     )
 
 
