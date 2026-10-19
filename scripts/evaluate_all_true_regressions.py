@@ -107,6 +107,8 @@ def main():
     t0 = time.time()
 
     for idx, tc in enumerate(target_cases, 1):
+        if idx % 10 == 0 or idx == len(target_cases):
+            print(f"[{idx}/{len(target_cases)}] Traitement en cours... ({time.time()-t0:.1f}s)", flush=True)
         cid = tc['crm_id']
         gt_siret = tc['gt_siret']
         crm_row = {

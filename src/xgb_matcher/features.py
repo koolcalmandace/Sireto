@@ -453,9 +453,19 @@ def parse_street_numbers(num_str: str | None) -> Set[int]:
     if not num_str:
         return set()
     nums: Set[int] = set()
-    for part in re.findall(r"\d+", str(num_str)):
+    raw_parts = re.findall(r"\d+", str(num_str))
+    for part in raw_parts:
         try:
             nums.add(int(part))
+        except ValueError:
+            pass
+    # If range like '6-8' or '6 a 10', expand intermediate values if range is short (<= 8)
+    if len(raw_parts) == 2:
+        try:
+            p0, p1 = int(raw_parts[0]), int(raw_parts[1])
+            if 0 < p1 - p0 <= 8:
+                step = 2 if (p0 % 2 == p1 % 2) else 1
+                nums.update(range(p0, p1 + 1, step))
         except ValueError:
             pass
     return nums

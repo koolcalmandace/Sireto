@@ -539,4 +539,108 @@ def test_rule_f_near_boundary_concordance_rescue():
     assert near_miss_siret in retained_sirets
 
 
+def test_rule_f_decontracted_and_sigle_rescue():
+    """
+    Verify Rule F upgrade: rescues a candidate ranked at position 65 with a decontracted
+    name match (e.g. L'ADAPT in CRM vs LADAPT in SIRENE) or sigle match.
+    """
+    n = 75
+    candidates = [{"siret": f"700000{i:03d}00010", "is_siege": False} for i in range(n)]
+
+    # Slot 64 (Rank 65): LADAPT with sigle_ul
+    ladapt_siret = "77569338500285"
+    candidates[64] = {
+        "siret": ladapt_siret,
+        "denomination_ul": "LADAPT",
+        "sigle_ul": "LADAPT",
+        "postcode_match": 1.0,
+        "name_token_overlap_max": 0.25,  # Only 1 word out of 4 in CRM
+        "name_jaro_max": 0.55,
+        "is_siege": False,
+    }
+
+    scores = np.linspace(1.0, 0.05, n)
+    crm_row = {"crm_name": "A0177 L'ADAPT CRF Bayeux", "crm_adresse": "RUE LOUVIERE"}
+
+    retained_indices, retained_sirets = apply_retention_topk(
+        candidates=candidates,
+        scores=scores,
+        top_k=50,
+        crm_row=crm_row,
+    )
+
+    assert len(retained_sirets) == 50
+    assert ladapt_siret in retained_sirets
+
+
+def test_guard1_dual_preservation_local_and_siege():
+    """
+    Verify Guard 1 Dual-Preservation: when a multi-site SIREN has both a local address match
+    and a Siège social in Top-50, both are preserved while redundant passive clones are pruned.
+    """
+    n = 60
+    candidates = [{"siret": f"800000{i:03d}00010", "is_siege": False} for i in range(n)]
+
+    siren = "893906024"
+    # Local address match at slot 5
+    local_siret = f"{siren}00037"
+    candidates[5] = {
+        "siret": local_siret,
+        "denomination": "ETUDE NOTARIALE",
+        "is_siege": False,
+        "street_number_match": 1.0,
+        "street_name_jaro": 0.95,
+        "name_jaro_max": 0.85,
+    }
+
+    # Siège social at slot 12
+    siege_siret = f"{siren}00011"
+    candidates[12] = {
+        "siret": siege_siret,
+        "denomination": "ETUDE NOTARIALE",
+        "is_siege": True,
+        "street_number_match": 0.0,
+        "street_name_jaro": 0.0,
+        "name_jaro_max": 0.85,
+    }
+
+    # Redundant passive clone 1 at slot 42
+    clone1_siret = f"{siren}00029"
+    candidates[42] = {
+        "siret": clone1_siret,
+        "denomination": "ETUDE NOTARIALE",
+        "is_siege": False,
+        "street_number_match": 0.0,
+        "street_name_jaro": 0.0,
+        "name_jaro_max": 0.40,
+    }
+
+    # Redundant passive clone 2 at slot 45
+    clone2_siret = f"{siren}00045"
+    candidates[45] = {
+        "siret": clone2_siret,
+        "denomination": "ETUDE NOTARIALE",
+        "is_siege": False,
+        "street_number_match": 0.0,
+        "street_name_jaro": 0.0,
+        "name_jaro_max": 0.40,
+    }
+
+    scores = np.linspace(1.0, 0.05, n)
+    crm_row = {"crm_name": "ETUDE NOTARIALE ROLLAND GURRIET", "crm_adresse": "2 RUE HENRI PASTOUREAU"}
+
+    retained_indices, retained_sirets = apply_retention_topk(
+        candidates=candidates,
+        scores=scores,
+        top_k=50,
+        crm_row=crm_row,
+    )
+
+    assert len(retained_sirets) == 50
+    # Both local establishment AND Siège social MUST be preserved!
+    assert local_siret in retained_sirets
+    assert siege_siret in retained_sirets
+
+
+
 

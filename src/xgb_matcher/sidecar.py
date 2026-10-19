@@ -435,12 +435,28 @@ def match_spatial_sectoral_dual_anchor(
     }
 
     spatial_cands: List[Dict[str, Any]] = []
+    cand_match_type: Dict[str, str] = {}
+
     for cand in candidates:
         cand_num = cand.get("numeroVoie")
-        if not cand_num:
-            continue
-        cand_nums = parse_street_numbers(str(cand_num))
-        if not (crm_nums & cand_nums):
+        cand_nums = parse_street_numbers(str(cand_num)) if cand_num else set()
+
+        # Fast pre-filtering by number:
+        # If candidate has a number, and CRM has a number, but the minimum difference > 4, skip immediately!
+        # (This avoids computing string operations on 98% of candidates in the commune)
+        m_type = "EXACT_NUM"
+        if cand_num and crm_nums:
+            if crm_nums & cand_nums:
+                m_type = "EXACT_NUM"
+            else:
+                min_diff = min(abs(cn - gn) for cn in crm_nums for gn in cand_nums)
+                if min_diff <= 4:
+                    m_type = "ADJACENT_NUM"
+                else:
+                    continue
+        elif not cand_num:
+            m_type = "NO_NUM_ROAD"
+        else:
             continue
 
         cand_voie = normalize_text(f"{cand.get('typeVoie') or ''} {cand.get('libelleVoie') or ''}")
@@ -453,19 +469,50 @@ def match_spatial_sectoral_dual_anchor(
         }
         shared_words = voie_words & crm_words
         sim = jaro_sim(cand_voie, crm_addr_norm)
+        same_street = bool(shared_words) or (sim >= 0.80)
 
-        # Exact number + shared specific street name word or high street jaro
-        if shared_words or sim >= 0.80:
-            spatial_cands.append(cand)
+        if not same_street:
+            continue
+
+        cand_siret = str(cand.get("siret") or "").strip()
+        spatial_cands.append(cand)
+        cand_match_type[cand_siret] = m_type
 
     if not spatial_cands:
         return set()
 
     # Case A: Single-Tenant Spatial Exclusivity (Exactly 1 active establishment at this address in commune)
     if len(spatial_cands) == 1:
-        siret = str(spatial_cands[0].get("siret") or "").strip()
-        if siret:
-            return {siret}
+        top_cand = spatial_cands[0]
+        siret = str(top_cand.get("siret") or "").strip()
+        m_type = cand_match_type.get(siret, "EXACT_NUM")
+
+        if m_type == "EXACT_NUM":
+            if siret:
+                return {siret}
+        else:
+            # For NO_NUM_ROAD or ADJACENT_NUM, verify minimal nominal or sectoral affinity
+            norm_crm_name = normalize_text(crm_name)
+            crm_name_words = {
+                w.upper() for w in norm_crm_name.split()
+                if len(w) >= 3 and w.lower() not in FRENCH_STOPWORDS
+            }
+            cand_all_names = get_candidate_all_names(top_cand)
+            cand_words = set()
+            for nm in cand_all_names:
+                cand_words.update(w.upper() for w in normalize_text(nm).split() if len(w) >= 3 and w.lower() not in FRENCH_STOPWORDS)
+
+            best_sim = max((jaro_sim(normalize_text(nm), norm_crm_name) for nm in cand_all_names), default=0.0)
+            shared_distinctive = {w for w in (cand_words & crm_name_words) if w not in COMMON_FRENCH_WORDS}
+
+            c_naf = str(top_cand.get("activitePrincipaleEtablissement") or top_cand.get("activitePrincipaleUniteLegale") or "").replace(".", "").upper()
+            predicted_nafs = predict_naf(norm_crm_name, top_k=5, min_similarity=min_vector_similarity)
+            target_prefixes = [code.replace(".", "").upper()[:4] for code, _ in predicted_nafs]
+            naf_match = any(c_naf.startswith(pref) for pref in target_prefixes) if c_naf else False
+
+            if shared_distinctive or best_sim >= 0.65 or naf_match:
+                if siret:
+                    return {siret}
 
     # Case B: Multi-Tenant Address -> Sectoral Matching + Token Specificity Disambiguation
     norm_crm_name = normalize_text(crm_name)

@@ -41,6 +41,7 @@ from .features import (
     normalize_name,
     normalize_text,
 )
+from .sidecar import COMMON_FRENCH_WORDS
 
 logger = logging.getLogger(__name__)
 
@@ -168,17 +169,19 @@ def apply_retention_topk(
     # Guard 4 preparation: Detect municipal administration query (Mairie/Hôtel de Ville)
     crm_norm = normalize_name(crm_name).upper() if crm_name else ""
     is_mairie_query = False
-    if cfg.enable_mairie_siege_rescue and crm_norm:
-        mairie_keywords = ("HOTEL DE VILLE", "HOTEL VILLE", "MAIRIE")
+    has_secondary_kw = False
+    if crm_norm:
         secondary_public_keywords = (
             "ECOLE", "GROUPE SCOLAIRE", "COLLEGE", "LYCEE", "GYMNASE", "PISCINE",
             "CRECHE", "CONSERVATOIRE", "STADE", "CENTRE SOCIAL", "CCAS", "EHPAD",
             "POLICE MUNICIPALE", "RESTAURANT SCOLAIRE", "CANTINE", "SALLE DES FETES",
         )
-        has_mairie_kw = any(kw in crm_norm for kw in mairie_keywords)
         has_secondary_kw = any(kw in crm_norm for kw in secondary_public_keywords)
-        if has_mairie_kw and not has_secondary_kw:
-            is_mairie_query = True
+        if cfg.enable_mairie_siege_rescue:
+            mairie_keywords = ("HOTEL DE VILLE", "HOTEL VILLE", "MAIRIE")
+            has_mairie_kw = any(kw in crm_norm for kw in mairie_keywords)
+            if has_mairie_kw and not has_secondary_kw:
+                is_mairie_query = True
 
     # -------------------------------------------------------------------------
     # 1. Identify Candidate Protections in Tail (ranks top_k to min(n_cands, tail_search_max))
@@ -233,6 +236,7 @@ def apply_retention_topk(
             c.get("nomUniteLegale"),
             c.get("prenom_usuel_ul"),
             c.get("sigle"),
+            c.get("sigle_ul"),
             c.get("sigleUniteLegale"),
         ]
         cand_text = " ".join(str(f) for f in cand_name_fields if f)
@@ -291,9 +295,12 @@ def apply_retention_topk(
                         seen_promoted.add(cand_idx)
                         continue
 
-        # Rule F: Near-Boundary Concordance Rescue (ranks top_k to 75)
+        # Rule F: Near-Boundary Concordance Rescue (ranks top_k to 90)
         # Rescues high-quality near-misses that slipped just below the cut-off
-        if rank_idx < 75:
+        if rank_idx < 90:
+            cj = str(c.get("cj_ul") or c.get("categorieJuridiqueUniteLegale") or "")
+            if has_secondary_kw and cj in ("7210", "7220"):
+                continue
             postcode_m = _get_val(cand_idx, "postcode_match", "postcode_match", 1.0)
             if postcode_m >= 1.0:
                 tok_overlap = _get_val(cand_idx, "name_token_overlap_max", "name_token_overlap_max", 0.0)
@@ -303,14 +310,52 @@ def apply_retention_topk(
                 exact_addr = _get_val(cand_idx, "exact_address_anchor", "exact_address_anchor", 0.0)
                 acronym_m = _get_val(cand_idx, "acronym_mutual_token_match", "acronym_mutual_token_match", 0.0)
 
+                # 1. Sigle match (e.g. LADAPT, B.E.S, CPI)
+                sigle_match = False
+                cand_sigles = [
+                    str(c.get("sigle_ul") or "").strip().upper(),
+                    str(c.get("sigle") or "").strip().upper(),
+                    str(c.get("sigleUniteLegale") or "").strip().upper(),
+                ]
+                for s_val in cand_sigles:
+                    if s_val and len(s_val) >= 2:
+                        clean_sigle = re.sub(r"[^A-Z0-9]", "", s_val)
+                        if clean_sigle and (clean_sigle in crm_tokens or any(clean_sigle in tok for tok in crm_tokens)):
+                            sigle_match = True
+                            break
+
+                # 2. De-contracted match (e.g. L'ADAPT vs LADAPT)
+                decontracted_match = False
+                crm_clean_no_punct = re.sub(r"[^A-Z0-9]", "", crm_name.upper()) if crm_name else ""
+                if crm_clean_no_punct:
+                    for f_val in cand_name_fields:
+                        if f_val:
+                            f_clean = re.sub(r"[^A-Z0-9]", "", str(f_val).upper())
+                            if len(f_clean) >= 4 and (f_clean in crm_clean_no_punct or crm_clean_no_punct in f_clean):
+                                decontracted_match = True
+                                break
+
+                # 3. Distinctive word overlap (token with len >= 4 not in common french words)
+                has_distinctive_word = False
+                if overlap_tokens:
+                    for tok in overlap_tokens:
+                        tok_u = tok.upper()
+                        if len(tok_u) >= 4 and tok_u not in COMMON_FRENCH_WORDS and not tok_u.isdigit():
+                            has_distinctive_word = True
+                            break
+
                 has_near_signal = (
                     (name_jaro >= 0.70)
+                    or (tok_overlap >= 0.33 and has_distinctive_word)
                     or (tok_overlap >= 0.50)
                     or (name_contains == 1.0)
                     or (crm_contains == 1.0)
                     or (enseigne_jaro >= 0.70)
                     or (exact_addr == 1.0)
                     or (acronym_m == 1.0)
+                    or sigle_match
+                    or decontracted_match
+                    or has_distinctive_word
                 )
                 if has_near_signal:
                     tail_candidates_to_promote.append(
@@ -371,6 +416,7 @@ def apply_retention_topk(
                     or (street_num_m >= 1.0)
                     or (addr_jaro >= cfg.signal_addr_jaro_min)
                     or (density <= 1.0 and street_jaro >= 0.70)
+                    or (street_jaro >= 0.85 or addr_jaro >= 0.85)
                 )
 
             # Signal 3: Signal nominal de l'entité
@@ -442,6 +488,7 @@ def apply_retention_topk(
             has_addr_signal = (
                 (street_num_m >= 1.0 and (street_jaro >= cfg.signal_street_name_jaro_min or addr_jaro >= cfg.signal_addr_jaro_min))
                 or (density <= 1.0 and (street_jaro >= 0.80 or addr_jaro >= 0.80))
+                or (street_jaro >= 0.85 or addr_jaro >= 0.85)
             )
 
         is_siege = bool(cand.get("is_siege", False)) or bool(cand.get("etablissementSiege", False)) or (_get_val(c_idx, "is_siege", "is_siege") == 1.0)
