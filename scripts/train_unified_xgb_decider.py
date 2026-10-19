@@ -208,15 +208,21 @@ def train_unified_decider(
     sample_df = df_valid.loc[selected_indices[:sample_size]].copy().reset_index(drop=True)
 
     # Découpage strict en 3 partitions par SIREN: Train (70%), Dev (15%), Test (15%)
-    gkf = GroupKFold(n_splits=10)
-    splits_gen = gkf.split(sample_df, groups=sample_df["siren"])
+    unique_sirens = sample_df["siren"].unique()
+    rng_siren = np.random.RandomState(random_seed)
+    shuffled_sirens = rng_siren.permutation(unique_sirens)
+    n_sirens = len(shuffled_sirens)
 
-    test_idx = next(splits_gen)[1]
-    dev_idx = next(splits_gen)[1]
+    n_train = int(n_sirens * 0.70)
+    n_dev = int(n_sirens * 0.15)
+
+    train_sirens = set(shuffled_sirens[:n_train])
+    dev_sirens = set(shuffled_sirens[n_train : n_train + n_dev])
+    test_sirens = set(shuffled_sirens[n_train + n_dev :])
 
     sample_df["split"] = "train"
-    sample_df.iloc[dev_idx, sample_df.columns.get_loc("split")] = "dev"
-    sample_df.iloc[test_idx, sample_df.columns.get_loc("split")] = "test"
+    sample_df.loc[sample_df["siren"].isin(dev_sirens), "split"] = "dev"
+    sample_df.loc[sample_df["siren"].isin(test_sirens), "split"] = "test"
 
     # Vérification stricte d'étanchéité (Zéro Data Leakage)
     sirens_train = set(sample_df[sample_df["split"] == "train"]["siren"])
