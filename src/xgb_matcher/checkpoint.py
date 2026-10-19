@@ -454,6 +454,10 @@ class TrainingFeatureCheckpointManager:
         self._buffer_dev_y: List[np.ndarray] = []
         self._buffer_dev_groups: List[int] = []
 
+        self._buffer_test_X: List[np.ndarray] = []
+        self._buffer_test_y: List[np.ndarray] = []
+        self._buffer_test_groups: List[int] = []
+
         self._chunk_start_idx: int = 0
         self._last_processed_idx: int = -1
         self._chunks_recorded: List[str] = []
@@ -496,15 +500,8 @@ class TrainingFeatureCheckpointManager:
 
     def load_checkpoint(
         self,
-    ) -> Tuple[
-        int,
-        List[np.ndarray],
-        List[np.ndarray],
-        List[int],
-        List[np.ndarray],
-        List[np.ndarray],
-        List[int],
-    ]:
+        include_test: bool = False,
+    ) -> Any:
         """Load all committed chunks from disk to resume training."""
         with open(self.manifest_path, "r", encoding="utf-8") as f:
             manifest = json.load(f)
@@ -521,6 +518,10 @@ class TrainingFeatureCheckpointManager:
         dev_X_list: List[np.ndarray] = []
         dev_y_list: List[np.ndarray] = []
         dev_groups: List[int] = []
+
+        test_X_list: List[np.ndarray] = []
+        test_y_list: List[np.ndarray] = []
+        test_groups: List[int] = []
 
         for c_name in self._chunks_recorded:
             c_path = self.checkpoint_dir / c_name
@@ -542,13 +543,32 @@ class TrainingFeatureCheckpointManager:
                     dev_y_list.append(d_y)
                     dev_groups.extend(d_g)
 
+                if "test_groups" in data and len(data["test_groups"]) > 0:
+                    test_X_list.append(data["test_X"])
+                    test_y_list.append(data["test_y"])
+                    test_groups.extend(data["test_groups"].tolist())
+
         logger.info(
-            "Resumed training checkpoint from %s: last_idx=%d, train_queries=%d, dev_queries=%d",
+            "Resumed training checkpoint from %s: last_idx=%d, train_queries=%d, dev_queries=%d, test_queries=%d",
             self.checkpoint_dir,
             self._last_processed_idx,
             len(train_groups),
             len(dev_groups),
+            len(test_groups),
         )
+        if include_test:
+            return (
+                self._last_processed_idx,
+                train_X_list,
+                train_y_list,
+                train_groups,
+                dev_X_list,
+                dev_y_list,
+                dev_groups,
+                test_X_list,
+                test_y_list,
+                test_groups,
+            )
         return (
             self._last_processed_idx,
             train_X_list,
@@ -572,18 +592,30 @@ class TrainingFeatureCheckpointManager:
             self._buffer_train_X.append(feat_matrix)
             self._buffer_train_y.append(y)
             self._buffer_train_groups.append(group_size)
+        elif split == "test":
+            self._buffer_test_X.append(feat_matrix)
+            self._buffer_test_y.append(y)
+            self._buffer_test_groups.append(group_size)
         else:
             self._buffer_dev_X.append(feat_matrix)
             self._buffer_dev_y.append(y)
             self._buffer_dev_groups.append(group_size)
 
-        total_in_buffer = len(self._buffer_train_groups) + len(self._buffer_dev_groups)
+        total_in_buffer = (
+            len(self._buffer_train_groups)
+            + len(self._buffer_dev_groups)
+            + len(self._buffer_test_groups)
+        )
         if total_in_buffer >= self.chunk_size:
             self.flush_chunk(last_idx=idx)
 
     def flush_chunk(self, last_idx: int) -> Optional[str]:
         """Atomically persist currently buffered samples into a compressed .npz chunk file."""
-        if not self._buffer_train_groups and not self._buffer_dev_groups:
+        if (
+            not self._buffer_train_groups
+            and not self._buffer_dev_groups
+            and not self._buffer_test_groups
+        ):
             self._last_processed_idx = last_idx
             self._write_manifest(last_idx=last_idx, completed=False)
             self._chunk_start_idx = last_idx + 1
@@ -618,6 +650,18 @@ class TrainingFeatureCheckpointManager:
         )
         d_g = np.array(self._buffer_dev_groups, dtype=np.int32)
 
+        te_x = (
+            np.vstack(self._buffer_test_X)
+            if self._buffer_test_X
+            else np.empty((0, num_feats), dtype=np.float32)
+        )
+        te_y = (
+            np.concatenate(self._buffer_test_y)
+            if self._buffer_test_y
+            else np.empty((0,), dtype=np.float32)
+        )
+        te_g = np.array(self._buffer_test_groups, dtype=np.int32)
+
         with open(tmp_chunk_path, "wb") as f:
             np.savez_compressed(
                 f,
@@ -627,6 +671,9 @@ class TrainingFeatureCheckpointManager:
                 dev_X=d_x,
                 dev_y=d_y,
                 dev_groups=d_g,
+                test_X=te_x,
+                test_y=te_y,
+                test_groups=te_g,
             )
         tmp_chunk_path.replace(chunk_path)
 
@@ -640,12 +687,19 @@ class TrainingFeatureCheckpointManager:
         self._buffer_dev_X.clear()
         self._buffer_dev_y.clear()
         self._buffer_dev_groups.clear()
+        self._buffer_test_X.clear()
+        self._buffer_test_y.clear()
+        self._buffer_test_groups.clear()
         self._chunk_start_idx = last_idx + 1
         return chunk_name
 
     def finalize(self, last_idx: int) -> None:
         """Flush remaining buffered samples and mark checkpoint as completed."""
-        if self._buffer_train_groups or self._buffer_dev_groups:
+        if (
+            self._buffer_train_groups
+            or self._buffer_dev_groups
+            or self._buffer_test_groups
+        ):
             self.flush_chunk(last_idx)
         self._last_processed_idx = last_idx
         self._completed = True

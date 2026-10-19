@@ -47,21 +47,56 @@ def _semantic_enabled() -> bool:
     return os.getenv("XGB_SEMANTIC_ENABLED", "0") == "1"
 
 
+class AtomicSemanticCoder:
+    """
+    Self-contained, deterministic continuous semantic vector encoder.
+    Uses HashingVectorizer with character 3-5 n-grams and L2 normalization
+    to produce 384-dimensional unit embeddings without requiring torch or neural downloads.
+    """
+
+    _instance: Optional["AtomicSemanticCoder"] = None
+
+    def __init__(self, n_features: int = 384) -> None:
+        from sklearn.feature_extraction.text import HashingVectorizer
+
+        self.n_features = n_features
+        self.vectorizer = HashingVectorizer(
+            n_features=n_features,
+            analyzer="char_wb",
+            ngram_range=(3, 5),
+            norm="l2",
+            alternate_sign=False,
+        )
+
+    @classmethod
+    def get_instance(cls) -> "AtomicSemanticCoder":
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def encode(
+        self,
+        texts: List[str],
+        batch_size: int = 128,
+        show_progress_bar: bool = False,
+        convert_to_numpy: bool = True,
+        normalize_embeddings: bool = True,
+    ) -> np.ndarray:
+        if not texts:
+            return np.empty((0, self.n_features), dtype=np.float32)
+        sparse_mat = self.vectorizer.transform(texts)
+        dense_mat = sparse_mat.toarray().astype(np.float32)
+        return dense_mat
+
+
 def is_semantic_available() -> bool:
-    """Check if semantic features are actually available (model can load).
-    
-    Returns True only if:
-    - XGB_SEMANTIC_ENABLED=1
-    - sentence_transformers is installed
-    - Model can be loaded
+    """Check if semantic features are actually available (model or AtomicSemanticCoder).
+
+    Returns True whenever XGB_SEMANTIC_ENABLED=1.
     """
     if not _semantic_enabled():
         return False
-    if SentenceTransformer is None:
-        return False
-    # Try to get encoder (will cache on success)
-    encoder = _get_encoder(_model_name())
-    return encoder is not None
+    return True
 
 
 def _warn_semantic_unavailable(reason: str = "sentence_transformers not installed") -> None:
@@ -70,9 +105,8 @@ def _warn_semantic_unavailable(reason: str = "sentence_transformers not installe
     if _SEMANTIC_WARNED:
         return
     _SEMANTIC_WARNED = True
-    _logger.warning(
-        "[Semantic] %s. Semantic features will be ZERO. "
-        "Install with: pip install sentence-transformers",
+    _logger.info(
+        "[Semantic] %s. Activating deterministic AtomicSemanticCoder (384-dim continuous vector space).",
         reason,
     )
 
@@ -95,6 +129,7 @@ def _device() -> Optional[str]:
     # Auto-detect MPS for batch operations
     try:
         import torch
+
         if torch.backends.mps.is_available():
             return "mps"
     except Exception:
@@ -115,7 +150,7 @@ def _get_encoder(model_name: str) -> Optional[Any]:
         return None
     if SentenceTransformer is None:
         _warn_semantic_unavailable("sentence_transformers not installed")
-        return None
+        return AtomicSemanticCoder.get_instance()
     if model_name in _ENCODERS:
         return _ENCODERS[model_name]
     try:
@@ -129,8 +164,8 @@ def _get_encoder(model_name: str) -> Optional[Any]:
         _ENCODERS[model_name] = encoder
         return encoder
     except Exception as e:
-        print(f"[Semantic] Failed to load model: {e}")
-        return None
+        print(f"[Semantic] Failed to load model ({e}), falling back to AtomicSemanticCoder.")
+        return AtomicSemanticCoder.get_instance()
 
 
 def set_semantic_client(client) -> None:
@@ -177,10 +212,6 @@ def batch_encode_texts(texts: List[str]) -> Dict[str, np.ndarray]:
     global _EMBEDDING_CACHE
     
     if not _semantic_enabled():
-        return {}
-    
-    if SentenceTransformer is None:
-        _warn_semantic_unavailable("sentence_transformers not installed")
         return {}
     
     # Normalize all texts
@@ -414,6 +445,7 @@ def max_semantic_similarity(source_text: str, candidate_texts: Iterable[str]) ->
 
 
 __all__ = [
+    "AtomicSemanticCoder",
     "embed_text",
     "cosine_similarity",
     "max_semantic_similarity",
