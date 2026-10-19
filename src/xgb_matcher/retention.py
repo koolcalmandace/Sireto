@@ -291,6 +291,34 @@ def apply_retention_topk(
                         seen_promoted.add(cand_idx)
                         continue
 
+        # Rule F: Near-Boundary Concordance Rescue (ranks top_k to 75)
+        # Rescues high-quality near-misses that slipped just below the cut-off
+        if rank_idx < 75:
+            postcode_m = _get_val(cand_idx, "postcode_match", "postcode_match", 1.0)
+            if postcode_m >= 1.0:
+                tok_overlap = _get_val(cand_idx, "name_token_overlap_max", "name_token_overlap_max", 0.0)
+                name_contains = _get_val(cand_idx, "name_contains_crm_max", "name_contains_crm_max", 0.0)
+                crm_contains = _get_val(cand_idx, "name_crm_contains_cand_max", "name_crm_contains_cand_max", 0.0)
+                enseigne_jaro = _get_val(cand_idx, "name_jaro_vs_enseigne", "name_jaro_vs_enseigne", 0.0)
+                exact_addr = _get_val(cand_idx, "exact_address_anchor", "exact_address_anchor", 0.0)
+                acronym_m = _get_val(cand_idx, "acronym_mutual_token_match", "acronym_mutual_token_match", 0.0)
+
+                has_near_signal = (
+                    (name_jaro >= 0.70)
+                    or (tok_overlap >= 0.50)
+                    or (name_contains == 1.0)
+                    or (crm_contains == 1.0)
+                    or (enseigne_jaro >= 0.70)
+                    or (exact_addr == 1.0)
+                    or (acronym_m == 1.0)
+                )
+                if has_near_signal:
+                    tail_candidates_to_promote.append(
+                        (15.0 + float(scores[cand_idx]), cand_idx, "NEAR_BOUNDARY_CONCORDANCE_RESCUE")
+                    )
+                    seen_promoted.add(cand_idx)
+                    continue
+
     if not tail_candidates_to_promote:
         return selected_indices, selected_sirets
 
@@ -299,7 +327,11 @@ def apply_retention_topk(
 
     # -------------------------------------------------------------------------
     # 2. Identify Eviction Candidates within Current Top-K (Guards 1 & 2)
+    #    CRITICAL: Slots 0 to min_eviction_slot - 1 are in the UPPER TIER SANCTUARY
+    #    and MUST NEVER be evicted to make room for tail promotions.
     # -------------------------------------------------------------------------
+    min_eviction_slot = max(0, cfg.top_k - cfg.max_swaps)  # e.g. slot 42 for top_k=50 and max_swaps=8
+
     # Multi-site SIREN tracking for Guard 1
     siren_members_in_topk: Dict[str, List[int]] = {}
     for slot_idx, cand_idx in enumerate(selected_indices):
@@ -310,7 +342,7 @@ def apply_retention_topk(
 
     eviction_priority_slots: List[int] = []
 
-    # 2A. Guard 1: Redundant passive clones of multi-site SIRENs (tail of top-k only)
+    # 2A. Guard 1: Redundant passive clones of multi-site SIRENs
     for siren, slot_list in siren_members_in_topk.items():
         passive_clone_slots: List[int] = []
         for slot in slot_list:
@@ -360,7 +392,7 @@ def apply_retention_topk(
             if not has_positive_signal:
                 passive_clone_slots.append(slot)
 
-        # Preserve the top passive clone, mark subsequent clones as eviction slots
+        # Preserve the top passive clone, mark subsequent clones as eviction candidates
         if len(passive_clone_slots) > 1:
             for evict_slot in passive_clone_slots[1:]:
                 if evict_slot not in eviction_priority_slots:
@@ -386,7 +418,9 @@ def apply_retention_topk(
             eviction_priority_slots.append(slot)
 
     # 2C. Fallback: Bottom slots of top-k without sidecar, name, physical address, or siege signal
-    for slot in range(cfg.top_k - 1, -1, -1):
+    # Restricted strictly to bottom slots (slot >= 35) to prevent evicting top-ranked ML candidates
+    bottom_tier_slot_min = max(25, cfg.top_k - cfg.max_swaps - 7)  # e.g. slot 35 for top_k=50
+    for slot in range(cfg.top_k - 1, bottom_tier_slot_min - 1, -1):
         if slot in eviction_priority_slots:
             continue
         c_idx = selected_indices[slot]
@@ -414,6 +448,8 @@ def apply_retention_topk(
 
         if not has_name_signal and not has_addr_signal and not is_siege:
             eviction_priority_slots.append(slot)
+
+    # Eviction order: Guard 1 (redundant clones) -> Guard 2 (high density) -> Guard 2C (bottom slots)
 
     # -------------------------------------------------------------------------
     # 3. Apply Swaps (Budget strictly capped at top_k and max_swaps)

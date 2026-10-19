@@ -467,3 +467,76 @@ def test_address_match_in_top50_never_evicted():
     assert hotel_siret in retained_sirets
 
 
+def test_upper_tier_sanctuary_ranks_1_to_35_never_evicted():
+    """
+    Verify Upper-Tier Sanctuary: Candidates ranked by XGBoost in slots 0 to 34 (Ranks 1 to 35)
+    can NEVER be evicted to make room for tail promotions, even if their administrative denomination
+    yields low name similarity (e.g. RECTORAT DE TOULOUSE at Rank 1 or POLE EMPLOI at Rank 1).
+    """
+    n = 60
+    candidates = [{"siret": f"900000{i:03d}00010", "is_siege": False} for i in range(n)]
+
+    # Slot 0 (Rank 1): Administrative candidate with low usage-name similarity
+    rank1_siret = candidates[0]["siret"]
+    candidates[0].update({
+        "name_jaro_max": 0.45,
+        "name_token_overlap_max": 0.0,
+        "street_number_match": 0.0,
+        "is_siege": False,
+    })
+
+    # Slot 55: High-priority promotion candidate in tail
+    promoted_tail_siret = candidates[55]["siret"]
+    candidates[55].update({
+        "name_jaro_max": 0.95,
+        "postcode_match": 1.0,
+    })
+
+    scores = np.linspace(1.0, 0.1, n)
+    crm_row = {"crm_name": "RECTORAT DE TOULOUSE", "crm_adresse": "10 PLACE JEAN DAVID"}
+
+    retained_indices, retained_sirets = apply_retention_topk(
+        candidates=candidates,
+        scores=scores,
+        top_k=50,
+        crm_row=crm_row,
+    )
+
+    assert len(retained_sirets) == 50
+    # Tail candidate promoted
+    assert promoted_tail_siret in retained_sirets
+    # Rank 1 candidate in upper tier sanctuary is strictly preserved at Rank 1!
+    assert retained_sirets[0] == rank1_siret
+
+
+def test_rule_f_near_boundary_concordance_rescue():
+    """
+    Verify Rule F: A near-miss candidate ranked at position 58 with local concordance
+    (same commune/postcode and token overlap >= 0.50) is rescued into Top-50.
+    """
+    n = 65
+    candidates = [{"siret": f"700000{i:03d}00010", "is_siege": False} for i in range(n)]
+
+    # Near-miss candidate at rank 58 (slot 57)
+    near_miss_siret = candidates[57]["siret"]
+    candidates[57].update({
+        "postcode_match": 1.0,
+        "name_token_overlap_max": 0.60,
+        "name_jaro_max": 0.65,
+    })
+
+    scores = np.linspace(1.0, 0.05, n)
+    crm_row = {"crm_name": "CENTRE PENITENCIER", "crm_adresse": "ROUTE DE PARIS"}
+
+    retained_indices, retained_sirets = apply_retention_topk(
+        candidates=candidates,
+        scores=scores,
+        top_k=50,
+        crm_row=crm_row,
+    )
+
+    assert len(retained_sirets) == 50
+    assert near_miss_siret in retained_sirets
+
+
+
