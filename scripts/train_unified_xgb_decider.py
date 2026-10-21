@@ -240,10 +240,10 @@ def train_unified_decider(
 
     # 2. Initialisation du Checkpointing Atomique et du Clean Stop
     if checkpoint_dir is None:
-        checkpoint_dir = PROJECT_ROOT / "data" / "train_checkpoints" / f"unified_decider_{sample_size}_seed{random_seed}"
+        checkpoint_dir = PROJECT_ROOT / "data" / "train_checkpoints" / f"unified_decider_h1max_{sample_size}_seed{random_seed}"
 
     ckpt_mgr = TrainingFeatureCheckpointManager(
-        tag=f"unified_decider_{sample_size}_seed{random_seed}",
+        tag=f"unified_decider_h1max_{sample_size}_seed{random_seed}",
         checkpoint_dir=checkpoint_dir,
         sample_size=sample_size,
         random_seed=random_seed,
@@ -467,13 +467,51 @@ def train_unified_decider(
     print(f"  Dimensions matrices : Train={X_train.shape}, Dev={X_dev.shape}, Test={X_test.shape}")
     print(f"  Positifs : Train={int(y_train.sum())}, Dev={int(y_dev.sum())}, Test={int(y_test.sum())}")
 
-    # Pondération des faux positifs colocataires (adresse identique mais nom distant)
+    # -------------------------------------------------------------------------
+    # Hard Negative Mining : surpondération ciblée des imposteurs du Fast Ranker
+    # -------------------------------------------------------------------------
     sample_weights = np.ones(len(X_train), dtype=np.float32)
     addr_jaro_idx = FEATURE_NAMES.index("addr_jaro")
     name_jaro_idx = FEATURE_NAMES.index("name_jaro_max")
+    is_siege_idx = FEATURE_NAMES.index("is_siege")
+    delta_siege_idx = FEATURE_NAMES.index("delta_addr_vs_siege")
+    geo_exact_idx = FEATURE_NAMES.index("geo_exact_match")
+    exact_anchor_idx = FEATURE_NAMES.index("exact_address_anchor")
+
+    # 1. Imposteurs Top-3 du Fast Ranker (candidats classés rang 1, 2 ou 3 mais y == 0.0)
+    top3_neg_mask = np.zeros(len(X_train), dtype=bool)
+    curr = 0
+    for g in train_groups:
+        for offset in range(min(3, g)):
+            if y_train[curr + offset] == 0.0:
+                top3_neg_mask[curr + offset] = True
+        curr += g
+    sample_weights[top3_neg_mask] = np.maximum(sample_weights[top3_neg_mask], 3.0)
+
+    # 2. Sièges distants déceptifs (siège officiel tentant de voler le match au local)
+    remote_siege_mask = (X_train[:, is_siege_idx] >= 0.5) & (X_train[:, delta_siege_idx] < -0.2) & (y_train == 0.0)
+    sample_weights[remote_siege_mask] = np.maximum(sample_weights[remote_siege_mask], 3.5)
+
+    # 3. Colocataires négatifs (adresse identique mais nom distant)
     coloc_mask = (X_train[:, addr_jaro_idx] > 0.80) & (X_train[:, name_jaro_idx] < 0.65) & (y_train == 0.0)
-    sample_weights[coloc_mask] = 3.0
-    print(f"  Colocataires négatifs surpondérés (3x) dans le Train : {int(coloc_mask.sum())}")
+    sample_weights[coloc_mask] = np.maximum(sample_weights[coloc_mask], 3.0)
+
+    # 4. Homonymes hors commune (nom élevé mais mauvaise localisation)
+    homonym_far_mask = (X_train[:, name_jaro_idx] > 0.85) & (X_train[:, geo_exact_idx] == 0.0) & (y_train == 0.0)
+    sample_weights[homonym_far_mask] = np.maximum(sample_weights[homonym_far_mask], 3.0)
+
+    # 5. Imposteurs d'ancre d'adresse (adresse exacte mais entreprise différente)
+    anchor_impostor_mask = (X_train[:, exact_anchor_idx] == 1.0) & (X_train[:, name_jaro_idx] < 0.60) & (y_train == 0.0)
+    sample_weights[anchor_impostor_mask] = np.maximum(sample_weights[anchor_impostor_mask], 3.5)
+
+    total_hard_negatives = int(np.sum(sample_weights > 1.0))
+    print(f"  Hard Negative Mining appliqué dans le Train :")
+    print(f"    - Imposteurs Top-3 Fast Ranker (3.0x) : {int(top3_neg_mask.sum())}")
+    print(f"    - Sièges distants déceptifs (3.5x)    : {int(remote_siege_mask.sum())}")
+    print(f"    - Colocataires même adresse (3.0x)    : {int(coloc_mask.sum())}")
+    print(f"    - Homonymes hors commune (3.0x)       : {int(homonym_far_mask.sum())}")
+    print(f"    - Imposteurs d'ancre d'adresse (3.5x) : {int(anchor_impostor_mask.sum())}")
+    print(f"    - Total lignes négatives surpondérées : {total_hard_negatives} ({total_hard_negatives / len(X_train) * 100:.1f}%)")
 
     classifier = xgb.XGBClassifier(
         early_stopping_rounds=EARLY_STOPPING_ROUNDS,

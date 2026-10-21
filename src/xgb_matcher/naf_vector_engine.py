@@ -59,6 +59,8 @@ class NafVectorEngine:
             stop_words=stopwords,
         )
         self.matrix = self.vectorizer.fit_transform(self.descriptions)
+        self._clean_to_idx = {code.replace(".", "").strip().upper(): idx for idx, code in enumerate(self.naf_codes)}
+        self._code_to_idx = {code.strip().upper(): idx for idx, code in enumerate(self.naf_codes)}
 
     @classmethod
     def get_instance(cls) -> "NafVectorEngine":
@@ -66,6 +68,65 @@ class NafVectorEngine:
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
+
+    def get_naf_similarity(self, query_text: str, naf_code: str) -> float:
+        """
+        Compute continuous cosine similarity between query text and a specific NAF code.
+        Returns 0.0 if naf_code is unknown or query is empty.
+        """
+        if not naf_code or not query_text:
+            return 0.0
+
+        clean_code = str(naf_code).replace(".", "").strip().upper()
+        idx = self._clean_to_idx.get(clean_code)
+        if idx is None:
+            idx = self._code_to_idx.get(str(naf_code).strip().upper())
+            if idx is None:
+                return 0.0
+
+        clean_query = _normalize_text(query_text)
+        if not clean_query:
+            return 0.0
+
+        try:
+            q_vec = self.vectorizer.transform([clean_query])
+            sim = float((q_vec @ self.matrix[idx].T)[0, 0])
+            return max(0.0, sim)
+        except Exception:
+            return 0.0
+
+    def get_batch_naf_similarities(self, query_text: str, naf_codes: List[str]) -> List[float]:
+        """
+        Compute continuous cosine similarity for a batch of candidate NAF codes against query text.
+        Projects query text once, then performs fast array lookups.
+        """
+        if not query_text or not naf_codes:
+            return [0.0] * len(naf_codes)
+
+        clean_query = _normalize_text(query_text)
+        if not clean_query:
+            return [0.0] * len(naf_codes)
+
+        try:
+            q_vec = self.vectorizer.transform([clean_query])
+            sims = (q_vec @ self.matrix.T).toarray()[0]
+        except Exception:
+            return [0.0] * len(naf_codes)
+
+        results: List[float] = []
+        for code in naf_codes:
+            if not code:
+                results.append(0.0)
+                continue
+            clean_code = str(code).replace(".", "").strip().upper()
+            idx = self._clean_to_idx.get(clean_code)
+            if idx is None:
+                idx = self._code_to_idx.get(str(code).strip().upper())
+            if idx is not None and 0 <= idx < len(sims):
+                results.append(max(0.0, float(sims[idx])))
+            else:
+                results.append(0.0)
+        return results
 
     def predict_top_naf(
         self,

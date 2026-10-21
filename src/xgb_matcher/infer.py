@@ -460,7 +460,14 @@ class XgbInferenceEngine:
                 feat["name_semantic_max"] = 0.0
                 feat["name_semantic_second"] = 0.0
                 feat["name_semantic_gap"] = 0.0
-        
+
+        # Compute delta_addr_vs_siege for Stage 2 candidates
+        from .features import compute_delta_addr_vs_siege_batch
+        retained_cands_400 = [c for _, c in cand_list_n]
+        deltas_400 = compute_delta_addr_vs_siege_batch(retained_cands_400, feats_n)
+        for feat, d in zip(feats_n, deltas_400):
+            feat["delta_addr_vs_siege"] = d
+
         # Stage 2 scoring
         X_n = pd.DataFrame(feats_n)[self.feature_order]
         probs = self.decider.predict_proba(X_n.values)[:, 1]
@@ -841,7 +848,14 @@ class XgbInferenceEngine:
                 feat["name_semantic_max"] = 0.0
                 feat["name_semantic_second"] = 0.0
                 feat["name_semantic_gap"] = 0.0
-        
+
+        # Compute delta_addr_vs_siege for Stage 2 candidates
+        from .features import compute_delta_addr_vs_siege_batch
+        retained_cands_800 = [c for _, c in cand_list_n]
+        deltas_800 = compute_delta_addr_vs_siege_batch(retained_cands_800, feats_n)
+        for feat, d in zip(feats_n, deltas_800):
+            feat["delta_addr_vs_siege"] = d
+
         # Stage 2 scoring
         X_n = pd.DataFrame(feats_n)[self.feature_order]
         probs = self.decider.predict_proba(X_n.values)[:, 1]

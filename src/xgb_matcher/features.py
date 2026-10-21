@@ -193,6 +193,10 @@ FEATURE_NAMES: List[str] = [
     "exact_address_anchor",       # 1.0 if street_number_match == 1.0 and street_name_jaro >= 0.85, 0.0 otherwise
     "is_commune_authority",       # 1.0 if candidate is local authority (cj in 72xx, 73xx) and in same commune (geo_exact_match == 1.0)
     "acronym_mutual_token_match", # 1.0 if CRM tokens contain acronym of cand or cand tokens/sigle contain acronym of CRM
+    # Stage 2 Discriminant Features (Hit@1 Maximization)
+    "delta_addr_vs_siege",        # addr concordance differential vs head office ([-1.0, 1.0])
+    "naf_vector_similarity",      # continuous cosine similarity between CRM name and official INSEE NAF
+    "civil_name_jaro",            # dual permutation Jaro similarity for natural persons (Nom Prenom / Prenom Nom)
 ]
 
 SEMANTIC_FEATURE_NAMES: List[str] = [
@@ -1342,7 +1346,139 @@ def make_features_from_preprocessed(
             acronym_mutual_score = 1.0
     features["acronym_mutual_token_match"] = acronym_mutual_score
 
+    # -------------------------------------------------------------------------
+    # Stage 2 Discriminant Features (Hit@1 Maximization)
+    # -------------------------------------------------------------------------
+    features["civil_name_jaro"] = compute_civil_name_jaro(crm.get("crm_name_norm", ""), cand)
+    features["naf_vector_similarity"] = compute_naf_vector_similarity(crm.get("crm_name", ""), cand)
+    features["delta_addr_vs_siege"] = 0.0  # Populated in batch context
+
     return features
+
+
+def compute_civil_name_jaro(crm_name_norm: str, cand: Dict[str, Any]) -> float:
+    """
+    Compute continuous Jaro similarity testing both permutations for natural persons:
+    - 'PRENOM NOM' vs CRM
+    - 'NOM PRENOM' vs CRM
+    - 'NOM' vs CRM
+    Also strips common civil titles (DR, DOCTEUR, ME, CABINET) to catch medical/legal practitioners.
+    Returns 0.0 if neither prenom nor nom is present.
+    """
+    crm_clean = normalize_text(crm_name_norm)
+    if not crm_clean:
+        return 0.0
+    prenom = str(cand.get("prenom_usuel_ul") or cand.get("prenom1") or "").strip()
+    nom = str(cand.get("nom_ul") or cand.get("nom") or "").strip()
+    if not nom and not prenom:
+        return 0.0
+
+    cand_p_n = normalize_text(f"{prenom} {nom}") if prenom and nom else ""
+    cand_n_p = normalize_text(f"{nom} {prenom}") if prenom and nom else ""
+    cand_nom = normalize_text(nom) if nom else ""
+
+    sim_p_n = jaro_sim(crm_clean, cand_p_n) if cand_p_n else 0.0
+    sim_n_p = jaro_sim(crm_clean, cand_n_p) if cand_n_p else 0.0
+    sim_nom = jaro_sim(crm_clean, cand_nom) if cand_nom else 0.0
+
+    best_sim = max(sim_p_n, sim_n_p, sim_nom)
+
+    # Check without common civil/medical/legal titles
+    crm_words = crm_clean.split()
+    if len(crm_words) >= 2 and crm_words[0] in {"DR", "DOCTEUR", "ME", "MAITRE", "CABINET", "MR", "MME", "MONSIEUR", "MADAME"}:
+        crm_stripped = " ".join(crm_words[1:])
+        if cand_p_n:
+            best_sim = max(best_sim, jaro_sim(crm_stripped, cand_p_n))
+        if cand_n_p:
+            best_sim = max(best_sim, jaro_sim(crm_stripped, cand_n_p))
+        if cand_nom:
+            best_sim = max(best_sim, jaro_sim(crm_stripped, cand_nom))
+
+    return float(best_sim)
+
+
+def compute_naf_vector_similarity(crm_name: str, cand: Dict[str, Any]) -> float:
+    """
+    Compute continuous cosine similarity between CRM query text and candidate's NAF code.
+    """
+    if not crm_name:
+        return 0.0
+    raw_naf = (
+        cand.get("activitePrincipaleEtablissement")
+        or cand.get("activitePrincipaleUniteLegale")
+        or cand.get("apet")
+        or cand.get("apen")
+        or cand.get("activitePrincipale")
+        or ""
+    )
+    if not raw_naf:
+        return 0.0
+    try:
+        from .naf_vector_engine import NafVectorEngine
+        return float(NafVectorEngine.get_instance().get_naf_similarity(crm_name, str(raw_naf)))
+    except Exception:
+        return 0.0
+
+
+def compute_delta_addr_vs_siege_batch(
+    candidates: List[Dict[str, Any]],
+    feats_list: List[Dict[str, float]],
+) -> List[float]:
+    """
+    Compute delta_addr_vs_siege for each candidate in the batch.
+    For secondary establishments:
+        addr_score(cand) - addr_score(siege_of_same_siren)
+    For head offices (siege):
+        addr_score(siege) - max(addr_score(secondary) for secondary of same siren)
+    If no comparison is possible (single establishment for siren): 0.0.
+    Bounded in [-1.0, 1.0].
+    """
+    n = len(candidates)
+    if n == 0:
+        return []
+
+    addr_scores: List[float] = []
+    sirens: List[str] = []
+    is_sieges: List[bool] = []
+
+    for i in range(n):
+        f = feats_list[i]
+        c = candidates[i]
+        score = f.get("street_name_jaro", 0.0) + 0.3 * f.get("street_number_match", 0.0)
+        addr_scores.append(score)
+
+        siret = str(c.get("siret") or "").strip().replace(" ", "").zfill(14)
+        siren = siret[:9] if len(siret) >= 9 else ""
+        sirens.append(siren)
+
+        is_siege = bool(f.get("is_siege", 0.0) >= 0.5 or c.get("is_siege", False))
+        is_sieges.append(is_siege)
+
+    siren_to_indices: Dict[str, List[int]] = {}
+    for i, siren in enumerate(sirens):
+        if siren:
+            siren_to_indices.setdefault(siren, []).append(i)
+
+    deltas = [0.0] * n
+    for siren, idxs in siren_to_indices.items():
+        if len(idxs) <= 1:
+            continue
+
+        siege_idx = next((i for i in idxs if is_sieges[i]), None)
+        secondary_idxs = [i for i in idxs if not is_sieges[i]]
+
+        if siege_idx is not None and secondary_idxs:
+            siege_score = addr_scores[siege_idx]
+            max_sec_score = max(addr_scores[i] for i in secondary_idxs)
+
+            for i in secondary_idxs:
+                diff = addr_scores[i] - siege_score
+                deltas[i] = max(-1.0, min(1.0, float(diff)))
+
+            diff_siege = siege_score - max_sec_score
+            deltas[siege_idx] = max(-1.0, min(1.0, float(diff_siege)))
+
+    return deltas
 
 
 _SPATIAL_RESOLVER = None
@@ -1381,7 +1517,7 @@ TEXT_FEATURE_NAMES: List[str] = [
     "name_length_max", "has_person_name", "person_name_jaro_max", "name_city_overlap_max",
     "name_is_city_like_max", "name_norm_exact", "alias_match", "token_overlap_ul",
     "ul_vs_pm_indicator", "name_jaro_vs_enseigne", "name_city_suffix_match",
-    "acronym_mutual_token_match",
+    "acronym_mutual_token_match", "civil_name_jaro",
 ]
 
 GEO_FEATURE_NAMES: List[str] = [
@@ -1399,13 +1535,13 @@ SPATIAL_FEATURE_NAMES: List[str] = [
 
 ADMIN_FEATURE_NAMES: List[str] = [
     "legal_form_category", "is_siege", "is_association", "is_copropriete", "is_crm_school", "sidecar_match", "is_active",
-    "is_commune_authority",
+    "is_commune_authority", "naf_vector_similarity",
 ]
 
 INTERACTION_FEATURE_NAMES: List[str] = [
     "name_addr_consistency", "addr_unsupported_by_name", "name_density_penalty",
     "addr_jaro_per_density", "postcode_match_without_addr", "full_addr_match_score",
-    "exact_address_anchor",
+    "exact_address_anchor", "delta_addr_vs_siege",
 ]
 
 _IDX_TEXT = [FEATURE_NAMES.index(fn) for fn in TEXT_FEATURE_NAMES]
@@ -1425,14 +1561,7 @@ def make_features_batch(
     Compute features for a batch of candidates for a single CRM query.
     Returns:
         features_matrix: np.ndarray of shape (N, len(FEATURE_NAMES))
-        vector_blocks: dict of sub-matrices {
-            "V_text": shape (N, 31),
-            "V_geo": shape (N, 10),
-            "V_admin": shape (N, 7),
-            "V_interact": shape (N, 6),
-            "V_spatial": shape (N, 4),
-        }
-    Strict mathematical parity: max difference vs scalar make_features_from_preprocessed is 0.0.
+        vector_blocks: dict of sub-matrices
     """
     if not candidates:
         empty_mat = np.zeros((0, len(FEATURE_NAMES)), dtype=np.float32)
@@ -1448,6 +1577,34 @@ def make_features_batch(
         make_features_from_preprocessed(crm_pre, cand, skip_semantic=skip_semantic)
         for cand in candidates
     ]
+
+    # 1. Batch delta_addr_vs_siege
+    deltas = compute_delta_addr_vs_siege_batch(candidates, feats_list)
+    for f, d in zip(feats_list, deltas):
+        f["delta_addr_vs_siege"] = d
+
+    # 2. Optimized batch NAF similarity
+    crm_name = str(crm_pre.get("crm_name") or "").strip()
+    if crm_name:
+        try:
+            from .naf_vector_engine import NafVectorEngine
+            raw_nafs = [
+                str(
+                    c.get("activitePrincipaleEtablissement")
+                    or c.get("activitePrincipaleUniteLegale")
+                    or c.get("apet")
+                    or c.get("apen")
+                    or c.get("activitePrincipale")
+                    or ""
+                )
+                for c in candidates
+            ]
+            naf_sims = NafVectorEngine.get_instance().get_batch_naf_similarities(crm_name, raw_nafs)
+            for f, n_sim in zip(feats_list, naf_sims):
+                f["naf_vector_similarity"] = n_sim
+        except Exception:
+            pass
+
     matrix = np.array(
         [[f[fn] for fn in FEATURE_NAMES] for f in feats_list],
         dtype=np.float32,
