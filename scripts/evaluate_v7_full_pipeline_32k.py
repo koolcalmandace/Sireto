@@ -35,8 +35,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     except Exception:
         pass
 
@@ -72,12 +72,19 @@ logger = logging.getLogger("evaluate_v7_full_pipeline_32k")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
+def safe_str(val: Any) -> str:
+    """Safely converts any value (including NaN/float/None) to a clean stripped string."""
+    if val is None or pd.isna(val):
+        return ""
+    return str(val).strip()
+
+
 def cluster_rows_by_locality(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Groups rows by commune in-memory to maximize Parquet store and TF-IDF cache hits."""
     commune_buckets: Dict[str, List[Dict[str, Any]]] = OrderedDict()
     for r in rows:
-        insee = (r.get("crm_insee") or r.get("insee") or "").strip()
-        cp = (r.get("crm_cp") or r.get("postcode") or "").strip()
+        insee = safe_str(r.get("crm_insee") or r.get("insee"))
+        cp = safe_str(r.get("crm_cp") or r.get("postcode"))
         key = f"insee_{insee}" if insee else (f"cp_{cp}" if cp else "unknown")
         commune_buckets.setdefault(key, []).append(r)
     clustered: List[Dict[str, Any]] = []
@@ -150,7 +157,7 @@ def run_pipeline_evaluation(
 
     # 2. Chargement du dataset CRM
     print("\n[2/4] Chargement et clustering géographique des requêtes CRM...")
-    df_crm = pd.read_csv(crm_path, sep=";", dtype=str)
+    df_crm = pd.read_csv(crm_path, sep=";", dtype=str, keep_default_na=False)
     all_rows = df_crm.to_dict(orient="records")
     if max_rows and max_rows > 0:
         all_rows = all_rows[:max_rows]
@@ -174,7 +181,7 @@ def run_pipeline_evaluation(
         is_resumed = True
         print(f"[REPRISE ATOMIQUE] Reprise active : {len(processed_crm_ids)} requêtes déjà traitées.")
 
-    unprocessed = [r for r in all_rows if (r.get("crm_id") or r.get("id") or "").strip() not in processed_crm_ids]
+    unprocessed = [r for r in all_rows if safe_str(r.get("crm_id") or r.get("id")) not in processed_crm_ids]
     eval_rows = cluster_rows_by_locality(unprocessed)
     print(f"  Total requêtes à traiter : {len(eval_rows)} / {len(all_rows)}")
 
@@ -217,18 +224,22 @@ def run_pipeline_evaluation(
 
     try:
         for idx, r in enumerate(eval_rows):
-            crm_id = (r.get("crm_id") or r.get("id") or str(idx)).strip()
-            gt_siret = str(r.get("gt_siret") or "").strip().zfill(14) if r.get("gt_siret") else ""
-            gt_etat = (r.get("gt_etat") or "A").strip().upper()
+            crm_id = safe_str(r.get("crm_id") or r.get("id")) or str(idx)
+            raw_gt = safe_str(r.get("gt_siret"))
+            gt_siret = raw_gt.zfill(14) if raw_gt else ""
+            gt_etat = safe_str(r.get("gt_etat") or r.get("sirene_etat") or "A").upper()
             is_active = (gt_etat == "A")
+
+            crm_cp = safe_str(r.get("crm_cp") or r.get("postcode") or r.get("sirene_cp"))
+            crm_insee = safe_str(r.get("crm_insee") or r.get("insee") or r.get("sirene_insee"))
 
             crm_row = {
                 "crm_id": crm_id,
-                "crm_name": str(r.get("crm_name") or "").strip(),
-                "crm_address": str(r.get("crm_adresse") or r.get("crm_address") or "").strip(),
-                "crm_city": str(r.get("crm_commune") or r.get("crm_city") or "").strip(),
-                "postcode": str(r.get("crm_cp") or r.get("postcode") or "").strip().zfill(5),
-                "insee": str(r.get("crm_insee") or r.get("insee") or "").strip().zfill(5),
+                "crm_name": safe_str(r.get("crm_name")),
+                "crm_address": safe_str(r.get("crm_adresse") or r.get("crm_address")),
+                "crm_city": safe_str(r.get("crm_commune") or r.get("crm_city")),
+                "postcode": crm_cp.zfill(5) if crm_cp else "",
+                "insee": crm_insee.zfill(5) if crm_insee else "",
             }
             crm_pre = preprocess_crm_row(crm_row)
 
