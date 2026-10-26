@@ -1,21 +1,26 @@
-import numpy as np
 import pickle
-
+from typing import Any
 import numpy as np
 
 class IsotonicCalibrator:
     """Wrapper for calibrated probabilities using Isotonic Regression."""
-    def __init__(self, base_estimator, iso_reg):
+    def __init__(self, base_estimator: Any, iso_reg: Any) -> None:
         self.base_estimator = base_estimator
         self.iso_reg = iso_reg
 
-    def predict_proba(self, X):
-        # Base estimator returns (N, 2), we take proba of class 1
-        proba = self.base_estimator.predict_proba(X)[:, 1]
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        if hasattr(self.base_estimator, "predict_proba"):
+            proba = self.base_estimator.predict_proba(X)[:, 1]
+        else:
+            import xgboost as xgb
+            dmat = xgb.DMatrix(X)
+            proba = self.base_estimator.predict(dmat)
         calibrated = self.iso_reg.predict(proba)
-        # Clip to ensure valid probabilities
-        calibrated = np.clip(calibrated, 0, 1)
-        return np.column_stack([1 - calibrated, calibrated])
+        calibrated = np.clip(calibrated, 0.0, 1.0)
+        return np.column_stack([1.0 - calibrated, calibrated])
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
 
 def load_calibrator(path):
     """Robustly load a calibrator pickle, handling module path changes."""

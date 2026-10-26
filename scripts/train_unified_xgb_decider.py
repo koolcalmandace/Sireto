@@ -172,6 +172,7 @@ def train_unified_decider(
     output_dir: Path = PROJECT_ROOT / "models",
     checkpoint_dir: Optional[Path] = None,
     calibration_method: str = "isotonic",
+    unattended: bool = False,
 ) -> Dict[str, Any]:
     """Execute unified Stage 2 XGBoost decider feature extraction and training."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -310,7 +311,11 @@ def train_unified_decider(
     except Exception:
         pass
 
-    power_mon = PowerMonitor(pause_on_lock=True, idle_timeout_seconds=300.0)
+    if unattended:
+        print("\n[POWER GUARD] Mode UNATTENDED actif: calcul continu sans pause sur inactivité/verrouillage.")
+        power_mon = PowerMonitor(pause_on_lock=False, idle_timeout_seconds=0.0)
+    else:
+        power_mon = PowerMonitor(pause_on_lock=True, idle_timeout_seconds=300.0)
     power_mon.start()
 
     t0 = time.perf_counter()
@@ -658,6 +663,7 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "models")
     parser.add_argument("--checkpoint-dir", type=Path, default=None)
     parser.add_argument("--calibration", choices=["isotonic", "sigmoid", "none"], default="isotonic")
+    parser.add_argument("--unattended", action="store_true", default=False, help="Run in unattended mode without pausing on inactivity or screen lock")
 
     args = parser.parse_args()
 
@@ -674,6 +680,7 @@ def main() -> None:
         output_dir=args.output_dir,
         checkpoint_dir=args.checkpoint_dir,
         calibration_method=args.calibration,
+        unattended=args.unattended,
     )
 
 
