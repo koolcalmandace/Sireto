@@ -36,7 +36,7 @@ def anti_sleep_worker(stop_event: threading.Event):
         if IS_WINDOWS:
             try:
                 ctypes.windll.kernel32.SetThreadExecutionState(
-                    ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED | ES_DISPLAY_REQUIRED
+                    ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED
                 )
             except Exception as e:
                 logger.debug("SetThreadExecutionState error: %s", e)
@@ -72,7 +72,7 @@ def main():
         "--cache-size", "40",
         "--max-ram-gb", "3.5",
         "--checkpoint-interval", "250",
-        "--no-pause-on-lock",
+        "--resume",
     ]
 
     logger.info("=" * 80)
@@ -84,9 +84,26 @@ def main():
     logger.info("=" * 80)
 
     try:
-        ret = subprocess.run(cmd, cwd=str(PROJECT_ROOT))
-        logger.info("Benchmark national 32K termine avec le code de sortie: %s", ret.returncode)
-        sys.exit(ret.returncode)
+        log_file = log_dir / "sentinel_v7_32k.log"
+        with open(log_file, "a", encoding="utf-8", buffering=1) as lf:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(PROJECT_ROOT),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+            )
+            for line in proc.stdout:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+                lf.write(line)
+                lf.flush()
+            ret_code = proc.wait()
+        logger.info("Benchmark national 32K termine avec le code de sortie: %s", ret_code)
+        sys.exit(ret_code)
     finally:
         stop_event.set()
 

@@ -175,21 +175,26 @@ def run_pipeline_evaluation(
     is_resumed = False
     processed_crm_ids: Set[str] = set()
 
-    if resume and ckpt.is_resumable():
+    if resume and details_path.exists() and details_path.stat().st_size > 0:
+        processed_crm_ids = ckpt.get_processed_crm_ids(details_path)
+        if processed_crm_ids:
+            is_resumed = True
+            print(f"[REPRISE ATOMIQUE] Reprise active : {len(processed_crm_ids)} requêtes déjà traitées depuis le CSV de détails.")
+    elif resume and ckpt.is_resumable():
         ckpt.load()
-        processed_crm_ids = ckpt.get_processed_ids()
+        processed_crm_ids = ckpt.get_processed_crm_ids(details_path)
         is_resumed = True
         print(f"[REPRISE ATOMIQUE] Reprise active : {len(processed_crm_ids)} requêtes déjà traitées.")
 
     unprocessed = [r for r in all_rows if safe_str(r.get("crm_id") or r.get("id")) not in processed_crm_ids]
     eval_rows = cluster_rows_by_locality(unprocessed)
-    print(f"  Total requêtes à traiter : {len(eval_rows)} / {len(all_rows)}")
+    print(f"  Total requêtes à traiter : {len(eval_rows)} / {len(all_rows)} ({len(processed_crm_ids)} déjà complétées)")
 
     # Initialisation store et résolveurs
     store = PartitionedCandidateStore(partitions_dir, max_cache_size=cache_size)
     config = RetrievalConfigV1(prefilter_k=prefilter_k, rescue_sidecar=True)
     tfidf_cache: OrderedDict = OrderedDict()
-    persistent_cache = TfidfPersistentCache(PROJECT_ROOT / "data" / "tfidf_cache")
+    persistent_cache = None  # In-memory RAM LRU only; avoids disk saturation on national scale
     memory_gov = MemoryGovernor(target_max_gb=max_ram_gb - 0.5, critical_max_gb=max_ram_gb, check_interval=10)
     spatial_resolver = SpatialResolver(ban_db_path) if ban_db_path.exists() else None
 
@@ -219,12 +224,57 @@ def run_pipeline_evaluation(
     total_auto, correct_auto = 0, 0
     total_review = 0
 
+    if is_resumed and details_path.exists():
+        try:
+            with open(details_path, "r", encoding="utf-8", errors="replace") as f:
+                reader = csv.DictReader(f, delimiter=";")
+                for row in reader:
+                    cid = safe_str(row.get("crm_id") or row.get("id"))
+                    if cid not in processed_crm_ids:
+                        continue
+                    etat = safe_str(row.get("gt_etat") or "A").upper()
+                    if etat == "A":
+                        n_active += 1
+                        s1_act_hit1 += int(row.get("s1_hit1") or 0)
+                        s1_act_hit50 += int(row.get("s1_hit50") or 0)
+                        s2_act_hit1 += int(row.get("s2_hit1") or 0)
+                        s2_act_hit5 += int(row.get("s2_hit5") or 0)
+                    r_dec = safe_str(row.get("routing_decision") or "REVIEW").upper()
+                    if r_dec == "AUTO":
+                        total_auto += 1
+                        if int(row.get("is_auto_correct") or 0) == 1:
+                            correct_auto += 1
+                    else:
+                        total_review += 1
+            print(f"[REPRISE ATOMIQUE] Métriques historiques synchronisées : {n_active} actives, S1 Hit@1: {s1_act_hit1/max(n_active, 1)*100:.1f}%, S2 Hit@1: {s2_act_hit1/max(n_active, 1)*100:.1f}%, AUTO: {total_auto/max(total_processed, 1)*100:.1f}%")
+        except Exception as e:
+            logger.warning("Impossible de recharger les métriques historiques : %s", e)
+
     t0 = time.perf_counter()
     print("\n[3/4] Exécution du Benchmark End-to-End...")
 
     try:
         for idx, r in enumerate(eval_rows):
             crm_id = safe_str(r.get("crm_id") or r.get("id")) or str(idx)
+
+            # Protocoles de sécurité Mobile Checkpointing & Closing Protection (Master Rule #9)
+            if power_mon.should_exit():
+                logger.warning("[SHUTDOWN] Signal d'extinction/fermeture OS détecté. Sauvegarde atomique et sortie propre...")
+                details_file.flush()
+                ckpt.step(total_processed, {})
+                sys.exit(0)
+            elif power_mon.should_pause():
+                logger.info("[PAUSE] Mise en pause propre du batch (verrou/capot fermé/veille)...")
+                details_file.flush()
+                ckpt.step(total_processed, {})
+                if hasattr(memory_gov, "release_memory"):
+                    memory_gov.release_memory(store=store, tfidf_cache=tfidf_cache, reason="POWER_PAUSE")
+                power_mon.wait_for_resume()
+                if power_mon.should_exit():
+                    logger.warning("[SHUTDOWN] Extinction système détectée pendant la pause. Sortie propre.")
+                    sys.exit(0)
+                logger.info("[REPRISE] Reprise transparente du batch après pause.")
+
             raw_gt = safe_str(r.get("gt_siret"))
             gt_siret = raw_gt.zfill(14) if raw_gt else ""
             gt_etat = safe_str(r.get("gt_etat") or r.get("sirene_etat") or "A").upper()
@@ -402,7 +452,7 @@ def run_pipeline_evaluation(
 
             if (idx + 1) % checkpoint_interval == 0 or (idx + 1) == len(eval_rows):
                 details_file.flush()
-                ckpt.step(crm_id, {})
+                ckpt.step(total_processed, {})
                 ckpt.save()
                 elapsed = time.perf_counter() - t0
                 rate = (idx + 1) / max(elapsed, 0.001)
@@ -483,7 +533,8 @@ def main():
     parser.add_argument("--max-ram-gb", type=float, default=3.5)
     parser.add_argument("--checkpoint-interval", type=int, default=250)
     parser.add_argument("--resume", action="store_true", default=True)
-    parser.add_argument("--no-pause-on-lock", action="store_true", default=True)
+    parser.add_argument("--pause-on-lock", dest="no_pause_on_lock", action="store_false", help="Enable closing protection and auto-pause on lid close/lock.")
+    parser.add_argument("--no-pause-on-lock", dest="no_pause_on_lock", action="store_true", default=False, help="Disable auto-pause on lid close/lock.")
     parser.add_argument("--max-rows", type=int, default=None)
 
     args = parser.parse_args()
