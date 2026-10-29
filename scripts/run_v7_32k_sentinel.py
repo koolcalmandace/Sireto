@@ -53,6 +53,7 @@ def main():
     decider_path = PROJECT_ROOT / "models" / "xgb_decider_unified_20261025_082618.json"
     calibrator_path = PROJECT_ROOT / "models" / "xgb_decider_unified_calibrator_isotonic_20261025_082618.pkl"
     risk_model = PROJECT_ROOT / "models" / "routing_risk_model.pkl"
+    risk_calibrator = PROJECT_ROOT / "models" / "routing_risk_calibrator.pkl"
     risk_meta = PROJECT_ROOT / "models" / "routing_risk_meta.json"
 
     cmd = [
@@ -66,6 +67,7 @@ def main():
         "--decider-model", str(decider_path),
         "--calibrator-path", str(calibrator_path),
         "--risk-model", str(risk_model),
+        "--risk-calibrator", str(risk_calibrator),
         "--risk-meta", str(risk_meta),
         "--prefilter-k", "500",
         "--top-k", "50",

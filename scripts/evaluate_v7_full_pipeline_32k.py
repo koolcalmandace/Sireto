@@ -67,6 +67,7 @@ from src.xgb_matcher.retrieval_config import RetrievalConfigV1
 from src.xgb_matcher.routing_risk import BASE_FEATURES, build_feature_row, default_feature_columns
 from src.xgb_matcher.spatial import SpatialResolver
 from src.xgb_matcher.tfidf_cache import TfidfPersistentCache
+from src.xgb_matcher.tie_breaker import apply_stage2_tie_breakers
 
 logger = logging.getLogger("evaluate_v7_full_pipeline_32k")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -102,7 +103,8 @@ def run_pipeline_evaluation(
     decider_path: Path,
     calibrator_path: Optional[Path],
     risk_model_path: Optional[Path],
-    risk_meta_path: Optional[Path],
+    risk_calibrator_path: Optional[Path] = None,
+    risk_meta_path: Optional[Path] = None,
     ban_db_path: Path = PROJECT_ROOT / "data" / "ban.duckdb",
     prefilter_k: int = 500,
     top_k: int = 50,
@@ -128,6 +130,7 @@ def run_pipeline_evaluation(
     print(f"Stage 2 Decider : {decider_path}")
     print(f"Calibrateur S2  : {calibrator_path}")
     print(f"Risk Model S3   : {risk_model_path}")
+    print(f"Risk Calib S3   : {risk_calibrator_path}")
     print("=" * 80)
 
     # 1. Chargement des modèles
@@ -143,6 +146,7 @@ def run_pipeline_evaluation(
         isotonic_calibrator = load_calibrator(calibrator_path)
 
     risk_model = None
+    risk_calibrator = None
     risk_threshold = 0.925
     risk_feature_names = default_feature_columns(BASE_FEATURES)
     if risk_meta_path and risk_meta_path.exists():
@@ -150,6 +154,19 @@ def run_pipeline_evaluation(
             rmeta = json.load(f)
             risk_threshold = rmeta.get("threshold", 0.925)
             risk_feature_names = rmeta.get("features", risk_feature_names)
+            if not risk_calibrator_path and rmeta.get("calibrator_path"):
+                cal_p = Path(rmeta.get("calibrator_path"))
+                if cal_p.exists():
+                    risk_calibrator_path = cal_p
+                elif (PROJECT_ROOT / cal_p).exists():
+                    risk_calibrator_path = PROJECT_ROOT / cal_p
+
+    if risk_calibrator_path and risk_calibrator_path.exists():
+        try:
+            risk_calibrator = load_calibrator(risk_calibrator_path)
+            logger.info("Calibrateur de risque Stage 3 chargé avec succès: %s", risk_calibrator_path)
+        except Exception as e:
+            logger.warning("Échec du chargement du calibrateur de risque: %s", e)
 
     if risk_model_path and risk_model_path.exists():
         with open(risk_model_path, "rb") as f:
@@ -364,8 +381,18 @@ def run_pipeline_evaluation(
                 else:
                     s2_calibrated = s2_raw_scores
 
-                # Classement Stage 2
+                # Classement Stage 2 avec Tie-Breaker Engine
                 s2_order = list(np.argsort(-s2_calibrated))
+                s2_order, tie_meta = apply_stage2_tie_breakers(
+                    retained_cands=retained_cands,
+                    s2_scores=s2_calibrated,
+                    s2_matrix=s2_matrix,
+                    feature_names=FEATURE_NAMES,
+                    max_k=5,
+                    min_score_floor=0.25,
+                    intra_siren_max_gap=0.20,
+                    inter_siren_max_gap=0.06,
+                )
                 s2_top1_idx = s2_order[0]
                 s2_top1_siret = str(retained_cands[s2_top1_idx].get("siret") or "").strip().zfill(14)
                 score_top1 = float(s2_calibrated[s2_top1_idx])
@@ -397,7 +424,13 @@ def run_pipeline_evaluation(
                             scene_dict[f"delta_{fn}"] = top1_feat[fi] - top2_feat[fi]
 
                         x_scene = np.array([[scene_dict.get(c, 0.0) for c in risk_feature_names]], dtype=np.float32)
-                        risk_prob = float(risk_model.predict_proba(x_scene)[0, 1])
+                        if risk_calibrator is not None:
+                            try:
+                                risk_prob = float(risk_calibrator.predict_proba(x_scene)[:, 1][0])
+                            except Exception:
+                                risk_prob = float(risk_model.predict_proba(x_scene)[0, 1])
+                        else:
+                            risk_prob = float(risk_model.predict_proba(x_scene)[0, 1])
                         route_risk_score = risk_prob
 
                         if risk_prob >= risk_threshold:
@@ -526,6 +559,7 @@ def main():
     parser.add_argument("--decider-model", type=Path, default=PROJECT_ROOT / "models" / "xgb_decider_unified_20261025_082618.json")
     parser.add_argument("--calibrator-path", type=Path, default=PROJECT_ROOT / "models" / "xgb_decider_unified_calibrator_isotonic_20261025_082618.pkl")
     parser.add_argument("--risk-model", type=Path, default=PROJECT_ROOT / "models" / "routing_risk_model.pkl")
+    parser.add_argument("--risk-calibrator", type=Path, default=PROJECT_ROOT / "models" / "routing_risk_calibrator.pkl")
     parser.add_argument("--risk-meta", type=Path, default=PROJECT_ROOT / "models" / "routing_risk_meta.json")
     parser.add_argument("--prefilter-k", type=int, default=500)
     parser.add_argument("--top-k", type=int, default=50)
@@ -548,6 +582,7 @@ def main():
         decider_path=args.decider_model,
         calibrator_path=args.calibrator_path,
         risk_model_path=args.risk_model,
+        risk_calibrator_path=args.risk_calibrator,
         risk_meta_path=args.risk_meta,
         prefilter_k=args.prefilter_k,
         top_k=args.top_k,

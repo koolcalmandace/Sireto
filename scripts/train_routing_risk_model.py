@@ -180,10 +180,8 @@ def main() -> None:
 
     # Build classifier based on model type
     if args.model_type == "xgb":
-        # Compute scale_pos_weight for class imbalance
-        n_neg = int((y_train == 0).sum())
-        n_pos = int((y_train == 1).sum())
-        scale_pos_weight = n_neg / n_pos if n_pos > 0 else 1.0
+        # Unweighted (scale_pos_weight=1.0) to preserve true probability calibration
+        scale_pos_weight = 1.0
         
         clf = XGBClassifier(
             n_estimators=args.xgb_n_estimators,

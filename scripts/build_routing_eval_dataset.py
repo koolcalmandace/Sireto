@@ -20,12 +20,8 @@ from src.xgb_matcher.routing_risk import BASE_FEATURES
 
 
 def _read_csv_auto(path: Path) -> pd.DataFrame:
-    sample = path.read_text(encoding="utf-8", errors="ignore")[:2048]
-    try:
-        dialect = csv.Sniffer().sniff(sample, delimiters=";,	")
-        delimiter = dialect.delimiter
-    except Exception:
-        delimiter = ";"
+    first_line = path.read_text(encoding="utf-8", errors="ignore").splitlines()[0]
+    delimiter = ";" if first_line.count(";") > first_line.count(",") else ","
     return pd.read_csv(path, dtype=str, sep=delimiter)
 
 
@@ -118,6 +114,9 @@ def load_ground_truth(path: Path) -> Tuple[Dict[str, set], Dict[str, set]]:
         df = pd.read_parquet(path)
     else:
         df = _read_csv_auto(path)
+
+    if "siret_candidate" in df.columns and "siret" not in df.columns:
+        df = df.rename(columns={"siret_candidate": "siret"})
 
     if "label" in df.columns and "siret" in df.columns:
         id_col = "crm_id" if "crm_id" in df.columns else "query_id"

@@ -45,6 +45,7 @@ Analyses approfondies, métriques empiriques et revues de code composant par com
 ## 3. 📜 Historique, Branches & Jalons
 Suivi chronologique des versions, branches Git et évolutions :
 * [`history/branch_history_and_milestones.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/history/branch_history_and_milestones.md) : Historique complet des versions (V6 $\rightarrow$ V7 $\rightarrow$ Route B $\rightarrow$ V8b) et registre des branches Git.
+* [`history/phase3c_tie_breaker_engine_and_stage3_recalibration.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/docs/history/phase3c_tie_breaker_engine_and_stage3_recalibration.md) : **Phase 3c : Moteur de Départagement Déterministe (Tie-Breaker Engine) & Recalibration Stage 3** (Résolution des 1 180 quasi-ratés Rangs 2-5, recalibration isotonique @ 99.84% précision, sanctuarisation 100% locale).
 * [`handover.md`](file:///c:/Users/Kabouassi/.gemini/antigravity-ide/scratch/Sireto-dev/handover.md) : Journal de bord actif, état des lieux courant et traçabilité des commits GitHub.
 
 ---

@@ -67,7 +67,7 @@
     "top2_name_addr_consistency",
     "delta_name_addr_consistency"
   ],
-  "threshold": 0.9250000000000004,
+  "threshold": 0.85,
   "calibration": "isotonic",
   "model_path": "models\\routing_risk_model.pkl",
   "calibrator_path": "models\\routing_risk_calibrator.pkl"

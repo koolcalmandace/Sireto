@@ -30,6 +30,7 @@ from .naming import build_candidate_names, primary_name, NameSource, CandidateNa
 from .checkpoint import CheckpointManager
 from .power_guard import PowerMonitor
 from .memory_governor import MemoryGovernor
+from .tie_breaker import apply_stage2_tie_breakers
 
 __all__ = [
     "normalize_text",
@@ -56,4 +57,5 @@ __all__ = [
     "CheckpointManager",
     "PowerMonitor",
     "MemoryGovernor",
+    "apply_stage2_tie_breakers",
 ]
