@@ -47,10 +47,11 @@ import xgboost as xgb
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.xgb_matcher.calibration import IsotonicCalibrator, load_calibrator
+from src.xgb_matcher.calibration import IsotonicCalibrator, SigmoidCalibrator, load_calibrator
 from src.xgb_matcher.checkpoint import CheckpointManager
 
 sys.modules["__main__"].IsotonicCalibrator = IsotonicCalibrator
+sys.modules["__main__"].SigmoidCalibrator = SigmoidCalibrator
 from src.xgb_matcher.features import (
     FAST_RANKER_FEATURE_NAMES,
     FEATURE_NAMES,
@@ -64,6 +65,11 @@ from src.xgb_matcher.power_guard import PowerMonitor
 from src.xgb_matcher.retention import apply_retention_topk
 from src.xgb_matcher.retrieval import build_candidate_pool
 from src.xgb_matcher.retrieval_config import RetrievalConfigV1
+from src.xgb_matcher.routing_deterministic import (
+    DeterministicRoutingConfig,
+    DeterministicRoutingResult,
+    route_from_feature_vector,
+)
 from src.xgb_matcher.routing_risk import BASE_FEATURES, build_feature_row, default_feature_columns
 from src.xgb_matcher.spatial import SpatialResolver
 from src.xgb_matcher.tfidf_cache import TfidfPersistentCache
@@ -115,6 +121,10 @@ def run_pipeline_evaluation(
     max_rows: Optional[int] = None,
     log_file: Optional[Path] = None,
     no_pause_on_lock: bool = True,
+    routing_mode: str = "deterministic",
+    deterministic_config: Optional[DeterministicRoutingConfig] = None,
+    stage2_ranker_path: Optional[Path] = None,
+    use_tie_breaker: bool = False,
 ) -> Dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoints_dir = output_dir / ".checkpoints"
@@ -126,11 +136,18 @@ def run_pipeline_evaluation(
     print("=" * 80)
     print("SIRETO V7 — BENCHMARK NATIONAL COMPLET 32K (STAGE 1 + STAGE 2 + STAGE 3)")
     print(f"Tag             : {tag}")
+    print(f"Routing Mode S3 : {routing_mode.upper()}")
     print(f"Stage 1 Ranker  : {ranker_path}")
+    if stage2_ranker_path:
+        print(f"Stage 2 Ranker  : {stage2_ranker_path}")
     print(f"Stage 2 Decider : {decider_path}")
     print(f"Calibrateur S2  : {calibrator_path}")
-    print(f"Risk Model S3   : {risk_model_path}")
-    print(f"Risk Calib S3   : {risk_calibrator_path}")
+    print(f"Tie-Breaker S2  : {'ON' if use_tie_breaker else 'OFF (Pure ML)'}")
+    if routing_mode == "risk":
+        print(f"Risk Model S3   : {risk_model_path}")
+        print(f"Risk Calib S3   : {risk_calibrator_path}")
+    else:
+        print("Deterministic   : 3-Pillar Natural Selection (Pillar 1 Floors, Tier A, Tier B)")
     print("=" * 80)
 
     # 1. Chargement des modèles
@@ -140,6 +157,11 @@ def run_pipeline_evaluation(
 
     decider_booster = xgb.Booster()
     decider_booster.load_model(str(decider_path))
+
+    stage2_ranker_booster = None
+    if stage2_ranker_path and stage2_ranker_path.exists():
+        stage2_ranker_booster = xgb.Booster()
+        stage2_ranker_booster.load_model(str(stage2_ranker_path))
 
     isotonic_calibrator = None
     if calibrator_path and calibrator_path.exists():
@@ -224,12 +246,23 @@ def run_pipeline_evaluation(
         "gt_in_pool", "s1_hit1", "s1_hit50",
         "s2_hit1", "s2_hit5", "s2_top1_siret",
         "score_top1", "score_top2", "score_gap",
-        "route_risk_score", "routing_decision", "is_auto_correct",
+        "route_risk_score", "routing_decision", "routing_tier", "is_auto_correct",
+        "name_jaro", "street_name_jaro", "postcode_match", "cand_is_active", "tie_breaker_applied",
     ]
 
     mode = "a" if is_resumed and details_path.exists() else "w"
+    if mode == "a":
+        try:
+            with open(details_path, "r", encoding="utf-8", errors="replace") as f_chk:
+                first_line = f_chk.readline()
+                existing_cols = [c.strip() for c in first_line.split(";")]
+                if "routing_tier" not in existing_cols:
+                    fieldnames = [c for c in fieldnames if c != "routing_tier"]
+        except Exception:
+            pass
+
     details_file = open(details_path, mode, newline="", encoding="utf-8")
-    writer = csv.DictWriter(details_file, fieldnames=fieldnames, delimiter=";")
+    writer = csv.DictWriter(details_file, fieldnames=fieldnames, delimiter=";", extrasaction="ignore")
     if mode == "w":
         writer.writeheader()
 
@@ -240,6 +273,7 @@ def run_pipeline_evaluation(
     s2_act_hit1, s2_act_hit5 = 0, 0
     total_auto, correct_auto = 0, 0
     total_review = 0
+    tier_a_count, tier_b_count = 0, 0
 
     if is_resumed and details_path.exists():
         try:
@@ -331,7 +365,13 @@ def run_pipeline_evaluation(
             score_top1, score_top2, score_gap = 0.0, 0.0, 0.0
             route_risk_score = 0.0
             routing_decision = "REVIEW"
+            routing_tier = ""
             is_auto_correct = 0
+            top1_name_jaro = 0.0
+            top1_street_jaro = 0.0
+            top1_postcode_match = 0.0
+            top1_cand_active = 0
+            tie_breaker_applied = 0
 
             if candidates:
                 # Stage 1 : Fast Ranker V9 (47 features)
@@ -381,18 +421,26 @@ def run_pipeline_evaluation(
                 else:
                     s2_calibrated = s2_raw_scores
 
-                # Classement Stage 2 avec Tie-Breaker Engine
-                s2_order = list(np.argsort(-s2_calibrated))
-                s2_order, tie_meta = apply_stage2_tie_breakers(
-                    retained_cands=retained_cands,
-                    s2_scores=s2_calibrated,
-                    s2_matrix=s2_matrix,
-                    feature_names=FEATURE_NAMES,
-                    max_k=5,
-                    min_score_floor=0.25,
-                    intra_siren_max_gap=0.20,
-                    inter_siren_max_gap=0.06,
-                )
+                # Classement Stage 2 (Spécialiste 1 Ranker 1B si fourni, sinon Decider)
+                if stage2_ranker_booster is not None:
+                    s2_rank_scores = stage2_ranker_booster.predict(dmat_s2)
+                    s2_order = list(np.argsort(-s2_rank_scores))
+                else:
+                    s2_order = list(np.argsort(-s2_calibrated))
+
+                if use_tie_breaker:
+                    s2_order, tie_meta = apply_stage2_tie_breakers(
+                        retained_cands=retained_cands,
+                        s2_scores=s2_calibrated,
+                        s2_matrix=s2_matrix,
+                        feature_names=FEATURE_NAMES,
+                        max_k=5,
+                        min_score_floor=0.25,
+                        intra_siren_max_gap=0.20,
+                        inter_siren_max_gap=0.06,
+                    )
+                    tie_breaker_applied = 1 if tie_meta.get("applied") else 0
+
                 s2_top1_idx = s2_order[0]
                 s2_top1_siret = str(retained_cands[s2_top1_idx].get("siret") or "").strip().zfill(14)
                 score_top1 = float(s2_calibrated[s2_top1_idx])
@@ -406,8 +454,30 @@ def run_pipeline_evaluation(
                     if ordered_sirets[0] == gt_siret:
                         s2_hit1 = 1
 
-                # Stage 3 : Routing Risk Model
-                if risk_model is not None:
+                routing_tier = ""
+                # Stage 3 : Routing
+                if routing_mode == "deterministic":
+                    det_res = route_from_feature_vector(
+                        top1_features=s2_matrix[s2_top1_idx],
+                        feature_names=FEATURE_NAMES,
+                        score_top1=score_top1,
+                        score_top2=score_top2,
+                        candidate_dict=retained_cands[s2_top1_idx],
+                        config=deterministic_config,
+                    )
+                    routing_decision = det_res.decision
+                    routing_tier = det_res.tier or ""
+                    route_risk_score = 1.0 if det_res.decision == "AUTO" else 0.0
+                    top1_name_jaro = det_res.name_jaro
+                    top1_street_jaro = det_res.street_name_jaro
+                    top1_postcode_match = det_res.postcode_match
+                    top1_cand_active = 1 if det_res.is_active else 0
+                    if routing_decision == "AUTO":
+                        if routing_tier == "TIER_A":
+                            tier_a_count += 1
+                        elif routing_tier == "TIER_B":
+                            tier_b_count += 1
+                elif risk_model is not None:
                     try:
                         # Construction rapide de la scène (top1, top2, deltas)
                         top1_feat = s2_matrix[s2_top1_idx]
@@ -459,7 +529,7 @@ def run_pipeline_evaluation(
                 s2_act_hit5 += s2_hit5
 
             # Écriture dans le CSV de détails
-            writer.writerow({
+            row_dict = {
                 "crm_id": crm_id,
                 "crm_name": crm_row["crm_name"],
                 "gt_siret": gt_siret,
@@ -476,7 +546,15 @@ def run_pipeline_evaluation(
                 "route_risk_score": round(route_risk_score, 4),
                 "routing_decision": routing_decision,
                 "is_auto_correct": is_auto_correct,
-            })
+                "name_jaro": round(top1_name_jaro, 4),
+                "street_name_jaro": round(top1_street_jaro, 4),
+                "postcode_match": round(top1_postcode_match, 1),
+                "cand_is_active": top1_cand_active,
+                "tie_breaker_applied": tie_breaker_applied,
+            }
+            if "routing_tier" in fieldnames:
+                row_dict["routing_tier"] = routing_tier
+            writer.writerow(row_dict)
 
             # Checkpoint & Memory release
             if len(tfidf_cache) > cache_size:
@@ -525,11 +603,14 @@ def run_pipeline_evaluation(
             "hit5_rate": round(s2_act_hit5 / max(n_active, 1) * 100.0, 2),
         },
         "stage3_routing": {
+            "routing_mode": routing_mode,
             "auto_rate": round(final_auto_rate, 2),
             "auto_precision": round(final_auto_prec, 2),
             "total_auto": total_auto,
             "correct_auto": correct_auto,
             "total_review": total_review,
+            "tier_a_count": tier_a_count,
+            "tier_b_count": tier_b_count,
         },
     }
 
@@ -539,9 +620,13 @@ def run_pipeline_evaluation(
     print("\n" + "=" * 80)
     print("BILAN FINAL DU BENCHMARK NATIONAL 32K PIPE V7")
     print(f"Total Traité       : {total_processed} requêtes")
+    print(f"Routing Mode S3    : {routing_mode.upper()}")
     print(f"Stage 1 Actif Hit@1: {summary['stage1_active']['hit1_rate']}% | Hit@50: {summary['stage1_active']['hit50_rate']}%")
     print(f"Stage 2 Actif Hit@1: {summary['stage2_active']['hit1_rate']}% | Hit@5: {summary['stage2_active']['hit5_rate']}%")
     print(f"Stage 3 AUTO Rate  : {final_auto_rate:.2f}% à {final_auto_prec:.2f}% de Précision Réelle")
+    if routing_mode == "deterministic":
+        print(f"  - Palier A (Haute certitude)      : {tier_a_count}")
+        print(f"  - Palier B (Domination contextuelle): {tier_b_count}")
     print(f"Stage 3 REVIEW Rate: {100.0 - final_auto_rate:.2f}%")
     print(f"Rapports générés   : {summary_path} et {details_path}")
     print("=" * 80, flush=True)
@@ -555,9 +640,18 @@ def main():
     parser.add_argument("--partitions-dir", type=Path, default=PROJECT_ROOT / "data" / "candidates_v8_national")
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "reports" / "full_pipeline_32k")
     parser.add_argument("--tag", type=str, default="32k_v7_full_pipeline")
+    parser.add_argument(
+        "--routing-mode",
+        type=str,
+        choices=["deterministic", "risk"],
+        default="deterministic",
+        help="Stage 3 routing mode: 'deterministic' (3-Pillar Natural Selection) or 'risk' (legacy metamodel).",
+    )
     parser.add_argument("--ranker-model", type=Path, default=PROJECT_ROOT / "models" / "xgbranker_fast_v9.json")
+    parser.add_argument("--stage2-ranker-model", type=Path, default=None, help="Optional Stage 2 Ranker (1B ordering specialist)")
     parser.add_argument("--decider-model", type=Path, default=PROJECT_ROOT / "models" / "xgb_decider_unified_20261025_082618.json")
     parser.add_argument("--calibrator-path", type=Path, default=PROJECT_ROOT / "models" / "xgb_decider_unified_calibrator_isotonic_20261025_082618.pkl")
+    parser.add_argument("--use-tie-breaker", action="store_true", default=False, help="Enable post-hoc Stage 2 Tie-Breaker Engine (default: OFF / Pure ML)")
     parser.add_argument("--risk-model", type=Path, default=PROJECT_ROOT / "models" / "routing_risk_model.pkl")
     parser.add_argument("--risk-calibrator", type=Path, default=PROJECT_ROOT / "models" / "routing_risk_calibrator.pkl")
     parser.add_argument("--risk-meta", type=Path, default=PROJECT_ROOT / "models" / "routing_risk_meta.json")
@@ -592,6 +686,9 @@ def main():
         resume=args.resume,
         max_rows=args.max_rows,
         no_pause_on_lock=args.no_pause_on_lock,
+        routing_mode=args.routing_mode,
+        stage2_ranker_path=args.stage2_ranker_model,
+        use_tie_breaker=args.use_tie_breaker,
     )
 
 

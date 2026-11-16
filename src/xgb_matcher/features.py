@@ -197,6 +197,12 @@ FEATURE_NAMES: List[str] = [
     "delta_addr_vs_siege",        # addr concordance differential vs head office ([-1.0, 1.0])
     "naf_vector_similarity",      # continuous cosine similarity between CRM name and official INSEE NAF
     "civil_name_jaro",            # dual permutation Jaro similarity for natural persons (Nom Prenom / Prenom Nom)
+    # Within-Query Relative Features (Stage 2 Pure-ML Ordering & Intra-SIREN Disambiguation)
+    "rel_addr_to_max",            # addr_jaro - max(addr_jaro in query)
+    "rel_name_to_max",            # name_jaro_max - max(name_jaro_max in query)
+    "rel_spatial_to_min",         # spatial_distance_km - min(spatial_distance_km in query), clipped >= 0
+    "is_best_addr_in_siren",      # 1.0 if candidate has best addr_jaro (or exact_address_anchor) within its SIREN
+    "siren_count_in_top50",       # count of candidates sharing the same 9-digit SIREN in the batch
 ]
 
 SEMANTIC_FEATURE_NAMES: List[str] = [
@@ -1551,6 +1557,63 @@ _IDX_ADMIN = [FEATURE_NAMES.index(fn) for fn in ADMIN_FEATURE_NAMES]
 _IDX_INTERACT = [FEATURE_NAMES.index(fn) for fn in INTERACTION_FEATURE_NAMES]
 
 
+_IDX_REL_ADDR = FEATURE_NAMES.index("rel_addr_to_max")
+_IDX_REL_NAME = FEATURE_NAMES.index("rel_name_to_max")
+_IDX_REL_SPATIAL = FEATURE_NAMES.index("rel_spatial_to_min")
+_IDX_BEST_ADDR_SIREN = FEATURE_NAMES.index("is_best_addr_in_siren")
+_IDX_SIREN_COUNT = FEATURE_NAMES.index("siren_count_in_top50")
+_IDX_ADDR_JARO = FEATURE_NAMES.index("addr_jaro")
+_IDX_NAME_JARO_MAX = FEATURE_NAMES.index("name_jaro_max")
+_IDX_SPATIAL_DIST = FEATURE_NAMES.index("spatial_distance_km")
+_IDX_EXACT_ANCHOR = FEATURE_NAMES.index("exact_address_anchor")
+
+
+def populate_query_relative_features(
+    matrix: np.ndarray,
+    candidates: List[Dict[str, Any]],
+) -> np.ndarray:
+    """Compute within-query relative features in-place on a (N, len(FEATURE_NAMES)) matrix."""
+    n = len(candidates)
+    if n == 0 or matrix.shape[0] != n:
+        return matrix
+
+    addr_vals = matrix[:, _IDX_ADDR_JARO]
+    name_vals = matrix[:, _IDX_NAME_JARO_MAX]
+    dist_vals = matrix[:, _IDX_SPATIAL_DIST]
+    anchor_vals = matrix[:, _IDX_EXACT_ANCHOR]
+
+    matrix[:, _IDX_REL_ADDR] = addr_vals - float(np.max(addr_vals))
+    matrix[:, _IDX_REL_NAME] = name_vals - float(np.max(name_vals))
+    min_dist = float(np.min(dist_vals))
+    matrix[:, _IDX_REL_SPATIAL] = np.maximum(0.0, dist_vals - min_dist)
+
+    sirens: List[str] = []
+    siren_to_indices: Dict[str, List[int]] = {}
+    for i, c in enumerate(candidates):
+        siret = str(c.get("siret") or "").strip().replace(" ", "").zfill(14)
+        siren = siret[:9] if len(siret) >= 9 and siret != "00000000000000" else ""
+        sirens.append(siren)
+        if siren:
+            siren_to_indices.setdefault(siren, []).append(i)
+
+    for i, siren in enumerate(sirens):
+        if not siren:
+            matrix[i, _IDX_SIREN_COUNT] = 1.0
+            matrix[i, _IDX_BEST_ADDR_SIREN] = 1.0
+            continue
+        idxs = siren_to_indices[siren]
+        matrix[i, _IDX_SIREN_COUNT] = float(len(idxs))
+        if len(idxs) == 1:
+            matrix[i, _IDX_BEST_ADDR_SIREN] = 1.0
+        else:
+            # Prefer exact_address_anchor, then highest addr_jaro within the SIREN
+            best_score = max(float(anchor_vals[j]) * 2.0 + float(addr_vals[j]) for j in idxs)
+            cand_score = float(anchor_vals[i]) * 2.0 + float(addr_vals[i])
+            matrix[i, _IDX_BEST_ADDR_SIREN] = 1.0 if cand_score >= best_score - 1e-6 else 0.0
+
+    return matrix
+
+
 def make_features_batch(
     crm_pre: Dict[str, Any],
     candidates: List[Dict[str, Any]],
@@ -1606,7 +1669,7 @@ def make_features_batch(
             pass
 
     matrix = np.array(
-        [[f[fn] for fn in FEATURE_NAMES] for f in feats_list],
+        [[f.get(fn, 0.0) for fn in FEATURE_NAMES] for f in feats_list],
         dtype=np.float32,
     )
 
@@ -1617,6 +1680,8 @@ def make_features_batch(
             matrix[:, _IDX_SPATIAL] = sp_mat
         except Exception as e:
             logger.debug("Failed computing batch spatial features: %s", e)
+
+    populate_query_relative_features(matrix, candidates)
 
     blocks = {
         "V_text": matrix[:, _IDX_TEXT],

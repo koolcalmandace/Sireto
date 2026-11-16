@@ -1,4 +1,5 @@
 """Sentinel runner for Full Pipe V7 32K (Stage 1 + Stage 2 + Stage 3) with Windows Anti-Sleep."""
+import argparse
 import ctypes
 import logging
 import subprocess
@@ -45,6 +46,12 @@ def anti_sleep_worker(stop_event: threading.Event):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Sentinel runner for Full Pipe V7 32K")
+    parser.add_argument("--routing-mode", type=str, choices=["deterministic", "risk"], default="deterministic")
+    parser.add_argument("--tag", type=str, default="32k_v7_full_pipeline")
+    parser.add_argument("--resume", action="store_true", default=True)
+    args, unknown = parser.parse_known_args()
+
     stop_event = threading.Event()
     anti_sleep_thread = threading.Thread(target=anti_sleep_worker, args=(stop_event,), daemon=True)
     anti_sleep_thread.start()
@@ -62,7 +69,8 @@ def main():
         "--crm", str(PROJECT_ROOT / "data" / "crm_ok_gt_merged_v1.csv"),
         "--partitions-dir", str(PROJECT_ROOT / "data" / "candidates_v8_national"),
         "--output-dir", str(PROJECT_ROOT / "reports" / "full_pipeline_32k"),
-        "--tag", "32k_v7_full_pipeline",
+        "--tag", args.tag,
+        "--routing-mode", args.routing_mode,
         "--ranker-model", str(ranker_path),
         "--decider-model", str(decider_path),
         "--calibrator-path", str(calibrator_path),
@@ -74,8 +82,9 @@ def main():
         "--cache-size", "40",
         "--max-ram-gb", "3.5",
         "--checkpoint-interval", "250",
-        "--resume",
     ]
+    if args.resume:
+        cmd.append("--resume")
 
     logger.info("=" * 80)
     logger.info("LANCEMENT OFFICIEL DU BENCHMARK NATIONAL PIPE V7 32K (STAGE 1 + 2 + 3)")

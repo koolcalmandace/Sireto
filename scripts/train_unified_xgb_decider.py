@@ -64,6 +64,7 @@ import xgboost as xgb
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.xgb_matcher.calibration import IsotonicCalibrator, SigmoidCalibrator
 from src.xgb_matcher.checkpoint import TrainingFeatureCheckpointManager
 from src.xgb_matcher.features import (
     FAST_RANKER_FEATURE_NAMES,
@@ -75,6 +76,7 @@ from src.xgb_matcher.features import (
 from src.xgb_matcher.memory_governor import MemoryGovernor
 from src.xgb_matcher.partitioned_store import PartitionedCandidateStore
 from src.xgb_matcher.power_guard import PowerMonitor
+from src.xgb_matcher.retention import apply_retention_topk
 from src.xgb_matcher.retrieval import build_candidate_pool
 from src.xgb_matcher.retrieval_config import RetrievalConfigV1
 from src.xgb_matcher.semantic import AtomicSemanticCoder, is_semantic_available
@@ -84,47 +86,17 @@ from src.xgb_matcher.tfidf_cache import TfidfPersistentCache
 logger = logging.getLogger("train_unified_xgb_decider")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-
-# Calibrator wrapper classes (pickle-compatible with inference pipeline)
-class IsotonicCalibrator:
-    """Wrapper for isotonic calibration of a base XGBoost classifier."""
-
-    def __init__(self, base_estimator: Any, iso_reg: Any) -> None:
-        self.base_estimator = base_estimator
-        self.iso_reg = iso_reg
-
-    def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        if hasattr(self.base_estimator, "predict_proba"):
-            proba = self.base_estimator.predict_proba(X)[:, 1]
-        else:
-            dmat = xgb.DMatrix(X, feature_names=FEATURE_NAMES)
-            proba = self.base_estimator.predict(dmat)
-        calibrated = self.iso_reg.predict(proba)
-        calibrated = np.clip(calibrated, 0.0, 1.0)
-        return np.column_stack([1.0 - calibrated, calibrated])
-
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
-
-
-class SigmoidCalibrator:
-    """Wrapper for sigmoid (Platt) calibration of a base XGBoost classifier."""
-
-    def __init__(self, base_estimator: Any, lr: Any) -> None:
-        self.base_estimator = base_estimator
-        self.lr = lr
-
-    def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        if hasattr(self.base_estimator, "predict_proba"):
-            proba = self.base_estimator.predict_proba(X)[:, 1]
-        else:
-            dmat = xgb.DMatrix(X, feature_names=FEATURE_NAMES)
-            proba = self.base_estimator.predict(dmat)
-        return self.lr.predict_proba(proba.reshape(-1, 1))
-
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
-
+RANKER_PARAMS = {
+    "objective": "rank:pairwise",
+    "learning_rate": 0.05,
+    "max_depth": 6,
+    "min_child_weight": 3,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "eval_metric": "ndcg@1",
+    "random_state": 42,
+    "n_estimators": 400,
+}
 
 CLASSIFIER_PARAMS = {
     "objective": "binary:logistic",
@@ -164,14 +136,14 @@ def train_unified_decider(
     partitions_dir: Path = PROJECT_ROOT / "data" / "candidates_v8_national",
     ranker_model_path: Path = PROJECT_ROOT / "models" / "xgbranker_fast_v9.json",
     ban_db_path: Path = PROJECT_ROOT / "data" / "ban.duckdb",
-    sample_size: int = 10000,
+    sample_size: int = 0,
     random_seed: int = 42,
     chunk_size: int = 250,
     top_k: int = 50,
     resume: bool = True,
     output_dir: Path = PROJECT_ROOT / "models",
     checkpoint_dir: Optional[Path] = None,
-    calibration_method: str = "isotonic",
+    calibration_method: str = "sigmoid",
     unattended: bool = False,
 ) -> Dict[str, Any]:
     """Execute unified Stage 2 XGBoost decider feature extraction and training."""
@@ -199,14 +171,15 @@ def train_unified_decider(
     rng = np.random.RandomState(random_seed)
     shuffled_communes = rng.permutation(communes)
 
+    target_n = len(df_valid) if sample_size <= 0 else min(sample_size, len(df_valid))
     selected_indices = []
     for comm in shuffled_communes:
         c_idxs = df_valid.index[df_valid["crm_insee"] == comm].tolist()
         selected_indices.extend(c_idxs)
-        if len(selected_indices) >= sample_size:
+        if len(selected_indices) >= target_n:
             break
 
-    sample_df = df_valid.loc[selected_indices[:sample_size]].copy().reset_index(drop=True)
+    sample_df = df_valid.loc[selected_indices[:target_n]].copy().reset_index(drop=True)
 
     # Découpage strict en 3 partitions par SIREN: Train (70%), Dev (15%), Test (15%)
     unique_sirens = sample_df["siren"].unique()
@@ -241,12 +214,12 @@ def train_unified_decider(
 
     # 2. Initialisation du Checkpointing Atomique et du Clean Stop
     if checkpoint_dir is None:
-        checkpoint_dir = PROJECT_ROOT / "data" / "train_checkpoints" / f"unified_decider_h1max_{sample_size}_seed{random_seed}"
+        checkpoint_dir = PROJECT_ROOT / "data" / "train_checkpoints" / f"unified_decider_1b_{len(FEATURE_NAMES)}f_{target_n}_seed{random_seed}"
 
     ckpt_mgr = TrainingFeatureCheckpointManager(
-        tag=f"unified_decider_h1max_{sample_size}_seed{random_seed}",
+        tag=f"unified_decider_1b_{len(FEATURE_NAMES)}f_{target_n}_seed{random_seed}",
         checkpoint_dir=checkpoint_dir,
-        sample_size=sample_size,
+        sample_size=target_n,
         random_seed=random_seed,
         feature_names=FEATURE_NAMES,
         chunk_size=chunk_size,
@@ -394,15 +367,20 @@ def train_unified_decider(
             dmat_fast = xgb.DMatrix(feat_fast, feature_names=FAST_RANKER_FEATURE_NAMES)
             fast_scores = ranker_booster.predict(dmat_fast)
 
-            # Filtrage Top-K (K=50) + préservation GT
-            order = np.argsort(-fast_scores)
-            selected_indices = list(order[:top_k])
+            # Filtrage Top-K (K=50) strictement aligné avec l'inférence (apply_retention_topk, zéro skew)
+            retained_indices, retained_sirets = apply_retention_topk(
+                candidates=cand_list,
+                scores=fast_scores,
+                top_k=top_k,
+                feat_matrix=feat_fast,
+                feature_names=FAST_RANKER_FEATURE_NAMES,
+                crm_row=crm_row,
+                name_idf_map=pool_res.idf_map,
+            )
+            if gt_siret not in retained_sirets:
+                continue
 
-            gt_cand_idx = next((i for i, c in enumerate(cand_list) if str(c.get("siret") or "").strip().zfill(14) == gt_siret), None)
-            if gt_cand_idx is not None and gt_cand_idx not in selected_indices:
-                selected_indices.append(gt_cand_idx)
-
-            retained_cands = [cand_list[i] for i in selected_indices]
+            retained_cands = [cand_list[i] for i in retained_indices]
 
             # Étape 2 : Extraction complète des 68 features Stage 2 avec AtomicSemanticCoder
             stage2_matrix, _ = make_features_batch(
@@ -530,6 +508,21 @@ def train_unified_decider(
         verbose=25,
     )
 
+    # 4b. Entraînement du Spécialiste 1 : XGBRanker (rank:pairwise pour maximisation Hit@1)
+    print("\n[4b/5] Entraînement du Spécialiste 1 (XGBRanker rank:pairwise) sur les mêmes groupes...")
+    stage2_ranker = xgb.XGBRanker(
+        early_stopping_rounds=EARLY_STOPPING_ROUNDS,
+        **RANKER_PARAMS,
+    )
+    stage2_ranker.fit(
+        X_train,
+        y_train,
+        group=train_groups,
+        eval_set=[(X_dev, y_dev)],
+        eval_group=[dev_groups],
+        verbose=25,
+    )
+
     # 5. Calibration Isotonique sur le Dev set (Levier 5)
     print("\n[5/5] Calibration Isotonique des probabilités et Évaluation des Métriques...")
     calibrator = None
@@ -603,6 +596,9 @@ def train_unified_decider(
     print("=" * 80)
 
     # Sauvegarde des modèles et métadonnées
+    stage2_ranker_path = output_dir / f"xgb_stage2_ranker_{timestamp}.json"
+    stage2_ranker.get_booster().save_model(str(stage2_ranker_path))
+
     decider_path = output_dir / f"xgb_decider_unified_{timestamp}.json"
     classifier.get_booster().save_model(str(decider_path))
 
@@ -612,19 +608,27 @@ def train_unified_decider(
         with open(calibrator_path, "wb") as f:
             pickle.dump(calibrator, f)
 
+    ranker_dev_hit1 = round(compute_hit_at_k(y_dev, stage2_ranker.predict(X_dev), dev_groups, k=1) * 100.0, 2)
+    ranker_test_hit1 = round(compute_hit_at_k(y_test, stage2_ranker.predict(X_test), test_groups, k=1) * 100.0, 2) if len(y_test) else 0.0
+    print(f"Ranker 1B (Dev/Test Hit@1) : Dev={ranker_dev_hit1}% | Test={ranker_test_hit1}%")
+
     meta_path = output_dir / f"xgb_decider_unified_meta_{timestamp}.json"
     meta = {
         "timestamp": timestamp,
-        "sample_size": sample_size,
+        "sample_size": target_n,
         "random_seed": random_seed,
         "feature_names": FEATURE_NAMES,
         "num_features": len(FEATURE_NAMES),
         "fast_ranker_model": str(ranker_model_path),
+        "stage2_ranker_model": str(stage2_ranker_path),
         "decider_model": str(decider_path),
         "calibrator_model": str(calibrator_path) if calibrator_path else None,
         "calibration_method": calibration_method,
+        "ranker_params": RANKER_PARAMS,
         "classifier_params": CLASSIFIER_PARAMS,
         "metrics": {
+            "stage2_ranker_dev_hit1": ranker_dev_hit1,
+            "stage2_ranker_test_hit1": ranker_test_hit1,
             "dev_raw": dev_metrics_raw,
             "dev_calibrated": dev_metrics_calib,
             "test_raw": test_metrics_raw,
@@ -640,6 +644,7 @@ def train_unified_decider(
         json.dump(meta, f, indent=2)
 
     print(f"\nModèles et métadonnées sauvegardés :")
+    print(f"  S2 Ranker  : {stage2_ranker_path}")
     print(f"  Decider    : {decider_path}")
     if calibrator_path:
         print(f"  Calibrator : {calibrator_path}")
@@ -654,7 +659,7 @@ def main() -> None:
     parser.add_argument("--partitions-dir", type=Path, default=PROJECT_ROOT / "data" / "candidates_v8_national")
     parser.add_argument("--ranker-model", type=Path, default=PROJECT_ROOT / "models" / "xgbranker_fast_v9.json")
     parser.add_argument("--ban-db", type=Path, default=PROJECT_ROOT / "data" / "ban.duckdb")
-    parser.add_argument("--sample-size", type=int, default=10000, help="Number of queries to sample")
+    parser.add_argument("--sample-size", type=int, default=0, help="Number of queries to sample (0 = all valid rows)")
     parser.add_argument("--random-seed", type=int, default=42, help="Random seed for sampling")
     parser.add_argument("--chunk-size", type=int, default=250, help="Queries per atomic chunk")
     parser.add_argument("--top-k", type=int, default=50, help="Top-K candidates per query from Stage 1")
@@ -662,7 +667,7 @@ def main() -> None:
     parser.add_argument("--no-resume", action="store_false", dest="resume", help="Disable auto-resume")
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "models")
     parser.add_argument("--checkpoint-dir", type=Path, default=None)
-    parser.add_argument("--calibration", choices=["isotonic", "sigmoid", "none"], default="isotonic")
+    parser.add_argument("--calibration", choices=["isotonic", "sigmoid", "none"], default="sigmoid")
     parser.add_argument("--unattended", action="store_true", default=False, help="Run in unattended mode without pausing on inactivity or screen lock")
 
     args = parser.parse_args()

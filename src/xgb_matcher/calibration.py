@@ -22,6 +22,27 @@ class IsotonicCalibrator:
     def predict(self, X: np.ndarray) -> np.ndarray:
         return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
 
+
+class SigmoidCalibrator:
+    """Wrapper for smooth sigmoid (Platt) calibration of a base XGBoost estimator."""
+
+    def __init__(self, base_estimator: Any, lr: Any) -> None:
+        self.base_estimator = base_estimator
+        self.lr = lr
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        if hasattr(self.base_estimator, "predict_proba"):
+            proba = self.base_estimator.predict_proba(X)[:, 1]
+        else:
+            import xgboost as xgb
+            dmat = xgb.DMatrix(X)
+            proba = self.base_estimator.predict(dmat)
+        return self.lr.predict_proba(np.asarray(proba, dtype=np.float64).reshape(-1, 1))
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
+
+
 def load_calibrator(path):
     """Robustly load a calibrator pickle, handling module path changes."""
     # Shim to redirect old script module path to new location
@@ -32,6 +53,8 @@ def load_calibrator(path):
         def find_class(self, module, name):
             if name == 'IsotonicCalibrator':
                 return IsotonicCalibrator
+            if name == 'SigmoidCalibrator':
+                return SigmoidCalibrator
             return super().find_class(module, name)
 
     with open(path, 'rb') as f:
